@@ -1,0 +1,17 @@
+seed: 42
+
+dataset:
+  n_samples: 1200
+  seq_len: 23
+
+model:
+  d_model: 32
+  nhead: 4
+  layers: 2
+
+training:
+  epochs: 8
+  lr: 0.001
+  batch_size: 32
+
+output: experiments/results/exp_02_deep

@@ -1,0 +1,23 @@
+# Python cache and tooling
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Environments and secrets
+.venv/
+.env
+
+# Notebook checkpoints
+.ipynb_checkpoints/
+
+# Data outputs
+data/processed/features/*.parquet
+data/processed/splits/*
+data/logs/*.h5
+
+# Experimental outputs
+experiments/results/*

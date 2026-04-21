@@ -1,0 +1,18 @@
+seed: 42
+
+dataset:
+  n_samples: 1400
+  n_features: 36
+  n_informative: 12
+
+model:
+  xgboost:
+    max_depth: 5
+    learning_rate: 0.1
+    n_estimators: 200
+  catboost:
+    depth: 6
+    learning_rate: 0.08
+    iterations: 300
+
+output: experiments/results/exp_01_baseline

@@ -1,0 +1,17 @@
+seed: 42
+
+dataset:
+  n_samples: 1200
+  n_features: 24
+  n_informative: 10
+
+model:
+  concept_dim: 8
+  hidden_dim: 32
+
+training:
+  epochs: 25
+  lr: 0.001
+  batch_size: 64
+
+output: experiments/results/exp_03_cbm

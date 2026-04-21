@@ -1,0 +1,23 @@
+seed: 42
+
+paths:
+  data_dir: data
+  results_dir: experiments/results
+
+split:
+  train: 0.70
+  val: 0.15
+  test: 0.15
+
+metrics:
+  - auprc
+  - auroc
+  - f1
+  - ess
+  - bas
+  - caet
+
+training:
+  batch_size: 32
+  epochs: 20
+  lr: 0.001
