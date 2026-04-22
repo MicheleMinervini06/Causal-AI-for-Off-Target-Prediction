@@ -32,9 +32,9 @@ dev = [
 ]
 
 [project.scripts]
-crispr-exp01 = "experiments.exp_01_baseline.run:main"
-crispr-exp02 = "experiments.exp_02_deep.run:main"
-crispr-exp03 = "experiments.exp_03_cbm.run:main"
+crispr-exp01 = "experiments.exp_01_baseline.run:cli_main"
+crispr-exp02 = "experiments.exp_02_deep.run:cli_main"
+crispr-exp03 = "experiments.exp_03_cbm.run:cli_main"
 crispr-benchmark = "evaluation.benchmark:main"
 
 [build-system]

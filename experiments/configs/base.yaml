@@ -1,23 +1,51 @@
-seed: 42
-
-paths:
-  data_dir: data
-  results_dir: experiments/results
+data:
+  changeseq_features: data/processed/features/changeseq_features.parquet
+  guideseq_features:  data/processed/features/guideseq_features.parquet
+  train_split:        data/processed/splits/train.parquet
+  val_split:          data/processed/splits/val.parquet
+  test_split:         data/processed/splits/test.parquet
+  vectors_changeseq:  data/logs/changeseq_vectors.h5
+  vectors_guideseq:   data/logs/guideseq_vectors.h5
 
 split:
-  train: 0.70
-  val: 0.15
-  test: 0.15
+  n_folds:     5
+  test_fold:   4
+  val_fold:    3
+  random_seed: 42
+  guide_col:   guide_name
 
-metrics:
-  - auprc
-  - auroc
-  - f1
-  - ess
-  - bas
-  - caet
+features:
+  feature_cols:
+    - pam_score
+    - pam_canonical
+    - mm_pam_proximal
+    - has_mm_pos1
+    - has_mm_pos1_2
+    - energy_pam_prox
+    - mm_seed_ext
+    - energy_seed_ext
+    - gc_seed
+    - mm_nonseed
+    - energy_nonseed
+    - gc_nonseed
+    - mm_seed_total
+    - mm_total
+    - energy_total
+    - gc_full
+    - n_wobble
+    - n_transition
+    - n_transversion
+    - first_mm_from_pam
+    - pam_x_seed_energy
 
-training:
-  batch_size: 32
-  epochs: 20
-  lr: 0.001
+evaluation:
+  primary_metric:   auprc
+  threshold_metric: f1
+  store_curves:     true
+  cross_assay:      true
+
+logging:
+  level:       INFO
+  results_dir: experiments/results/
+  save_model:  true
+  save_shap:   true

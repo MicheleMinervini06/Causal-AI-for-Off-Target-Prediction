@@ -1,18 +1,45 @@
-seed: 42
+_base: experiments/configs/base.yaml
 
-dataset:
-  n_samples: 1400
-  n_features: 36
-  n_informative: 12
+experiment:
+  name:        exp_01_baseline
+  description: >
+    Baseline XGBoost con feature biologiche derivate dal DAG.
+    Valutazione within-dataset (CHANGE-seq) e cross-assay (GUIDE-seq).
+    Calcola SHAP values per BAS baseline.
 
 model:
-  xgboost:
-    max_depth: 5
-    learning_rate: 0.1
-    n_estimators: 200
-  catboost:
-    depth: 6
-    learning_rate: 0.08
-    iterations: 300
+  type: xgboost
+  params:
+    max_depth:             6
+    learning_rate:         0.05
+    n_estimators:          500
+    subsample:             0.8
+    colsample_bytree:      0.8
+    min_child_weight:      5
+    gamma:                 0.1
+    reg_alpha:             0.1
+    reg_lambda:            1.0
+    random_state:          42
+  early_stopping_rounds:   30
 
-output: experiments/results/exp_01_baseline
+ablation:
+  run: true
+  variants:
+    - name: pam_only
+      feature_cols:
+        - pam_score
+        - pam_canonical
+    - name: seed_only
+      feature_cols:
+        - mm_pam_proximal
+        - has_mm_pos1
+        - mm_seed_ext
+        - mm_seed_total
+    - name: no_energy
+      exclude_cols:
+        - energy_pam_prox
+        - energy_seed_ext
+        - energy_nonseed
+        - energy_total
+    - name: full_dag
+      feature_cols: null

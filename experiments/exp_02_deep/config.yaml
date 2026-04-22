@@ -1,3 +1,11 @@
+_base: experiments/configs/base.yaml
+
+experiment:
+  name: exp_02_deep
+  description: >
+    Esperimento deep non ancora migrato completamente al nuovo approccio.
+    Placeholder coerente con lo schema config di exp_01.
+
 seed: 42
 
 dataset:
@@ -13,5 +21,3 @@ training:
   epochs: 8
   lr: 0.001
   batch_size: 32
-
-output: experiments/results/exp_02_deep
