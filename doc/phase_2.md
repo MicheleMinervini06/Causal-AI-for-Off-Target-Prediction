@@ -69,6 +69,17 @@ experiments/results/exp_02_scm/
 ├── ccs_baseline.json             ← CCS del modello XGBoost (riferimento per fase 3)
 └── intervention_dataset.parquet  ← dataset sintetico per Neural SCM
 
+## TODO Tecnici
+1. Raffinare `backdoor_adjustment` in `dag/do_calculus.py`.
+	Stato attuale: usa una strategia conservativa basata su antenati comuni e esclusione dei discendenti del treatment.
+	Perche va bene ora: con il DAG corrente e piccolo e sufficiente per le query principali della fase 2.
+	Upgrade previsto: aggiungere un controllo formale via d-separation / backdoor path blocking per casi piu complessi.
+
+2. Raffinare il confronto osservazionale in `do_query`.
+	Stato attuale: `P(Y|X=x)` e stimata con matching esatto sui valori di intervento (`np.isclose` per numerici).
+	Perche va bene ora: mantiene una baseline semplice e trasparente per mostrare il gap con `P(Y|do(X=x))`.
+	Upgrade previsto: introdurre binning/nearest-neighbors o smoothing quando `n_observational` e troppo piccolo.
+
 ## La connessione con la fase 3
 Il risultato più importante della fase 2 non è la performance predittiva — è il gap tra risposte associazionali e interventionali. Se P(Y∣PAM=NAG)≠P(Y∣do(PAM=NAG))P(Y \mid \text{PAM}=\text{NAG}) \neq P(Y \mid do(\text{PAM}=\text{NAG}))
 P(Y∣PAM=NAG)=P(Y∣do(PAM=NAG)) in modo sistematico, hai dimostrato empiricamente che i modelli associazionali (XGBoost, CCLMoff) non possono rispondere alle domande clinicamente rilevanti. Il Neural SCM in fase 3 viene motivato esattamente da questo gap.
