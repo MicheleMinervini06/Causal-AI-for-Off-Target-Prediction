@@ -3,11 +3,13 @@ from __future__ import annotations
 from itertools import product
 from typing import Any, Mapping
 
+import networkx as nx
 import numpy as np
 import pandas as pd
+from pgmpy.inference import CausalInference
+from pgmpy.models import BayesianNetwork
 
 from dag.scm import CRISPRCausalModel
-
 
 # child -> parents
 DEFAULT_DAG: dict[str, list[str]] = {
@@ -28,38 +30,13 @@ def _ensure_dag(dag: Mapping[str, list[str]] | None) -> dict[str, list[str]]:
     return {str(k): [str(parent) for parent in v] for k, v in dag.items()}
 
 
-def _children_map(dag: Mapping[str, list[str]]) -> dict[str, set[str]]:
-    out: dict[str, set[str]] = {}
+def _build_nx_graph(dag: Mapping[str, list[str]]) -> nx.DiGraph:
+    """Costruisce un DiGraph di NetworkX dal dizionario DAG."""
+    G = nx.DiGraph()
     for child, parents in dag.items():
-        out.setdefault(child, set())
         for parent in parents:
-            out.setdefault(parent, set()).add(child)
-    return out
-
-
-def _ancestors_of(node: str, dag: Mapping[str, list[str]]) -> set[str]:
-    visited: set[str] = set()
-    stack: list[str] = [node]
-    while stack:
-        current = stack.pop()
-        for parent in dag.get(current, []):
-            if parent not in visited:
-                visited.add(parent)
-                stack.append(parent)
-    return visited
-
-
-def _descendants_of(node: str, dag: Mapping[str, list[str]]) -> set[str]:
-    children = _children_map(dag)
-    visited: set[str] = set()
-    stack: list[str] = [node]
-    while stack:
-        current = stack.pop()
-        for child in children.get(current, set()):
-            if child not in visited:
-                visited.add(child)
-                stack.append(child)
-    return visited
+            G.add_edge(parent, child)
+    return G
 
 
 def _normalize_intervention(intervention: Mapping[str, Any]) -> dict[str, Any]:
@@ -87,6 +64,7 @@ def _propagate_scm_under_intervention(
     scm: CRISPRCausalModel,
     df: pd.DataFrame,
     intervention: Mapping[str, Any],
+    dag: Mapping[str, list[str]] | None = None,
 ) -> pd.DataFrame:
     out = df.copy()
 
@@ -95,31 +73,44 @@ def _propagate_scm_under_intervention(
             raise ValueError(f"Intervention key not in dataframe: {key}")
         out[key] = value
 
-    # Topological order for the current SCM equations.
-    equations = [
-        ("pam_score", scm.pam_equation),
-        ("mismatch_rate", scm.mismatch_equation),
-        ("label", scm.activity_equation),
-    ]
+    # Genera l'ordinamento topologico dinamicamente (Fix Architetturale)
+    graph = _build_nx_graph(_ensure_dag(dag))
+    try:
+        topological_order = list(nx.topological_sort(graph))
+    except nx.NetworkXUnfeasible:
+        raise ValueError("Il DAG contiene cicli e non può essere ordinato topologicamente.")
 
-    for target, equation in equations:
-        if target in intervention:
+    # Mappiamo i target alle equazioni disponibili nell'SCM
+    scm_equations = {
+        eq.target: eq
+        for eq in [scm.pam_equation, scm.mismatch_equation, scm.activity_equation]
+    }
+
+    # Propaghiamo seguendo l'ordine del DAG
+    for target in topological_order:
+        if target in intervention or target not in scm_equations:
             continue
+        
+        equation = scm_equations[target]
         for parent in equation.parents:
             if parent not in out.columns:
                 raise ValueError(f"Missing parent column '{parent}' required by equation '{target}'")
+        
         predicted = equation.predict(out)
+        
         if target == "label":
             out["activity_probability"] = predicted
             out["label"] = (predicted >= 0.5).astype(int)
         else:
             out[target] = predicted
 
+    # Fallback nel caso estremo di do(label=x)
     if "activity_probability" not in out.columns:
         if "label" in intervention:
             out["activity_probability"] = np.clip(out["label"].to_numpy(dtype=float), 0.0, 1.0)
         else:
             out["activity_probability"] = scm.activity_equation.predict(out)
+            
     return out
 
 
@@ -143,22 +134,28 @@ def backdoor_adjustment(
     treatment: str,
     outcome: str,
 ) -> set[str]:
-    """Return a practical backdoor adjustment set from a known DAG.
+    """Return a valid backdoor adjustment set using pgmpy.
 
-    This implementation is intentionally conservative and returns observable nodes
-    that are common ancestors of treatment and outcome, excluding descendants of
-    treatment and excluding treatment/outcome themselves.
+    This ensures full d-separation and prevents collider bias, unlike
+    simple common-ancestor heuristics.
     """
-    graph = _ensure_dag(dag)
-    treatment = str(treatment)
-    outcome = str(outcome)
+    graph_dict = _ensure_dag(dag)
+    edges = []
+    for child, parents in graph_dict.items():
+        for parent in parents:
+            edges.append((parent, child))
 
-    anc_t = _ancestors_of(treatment, graph)
-    anc_y = _ancestors_of(outcome, graph)
-    descendants_t = _descendants_of(treatment, graph)
-
-    candidates = (anc_t & anc_y) - descendants_t - {treatment, outcome}
-    return set(sorted(candidates))
+    model = BayesianNetwork(edges)
+    inference = CausalInference(model)
+    
+    # pgmpy estrae formalmente i set validi per il backdoor criterion
+    backdoor_sets = inference.get_all_backdoor_adjustment_sets(treatment, outcome)
+    
+    if not backdoor_sets:
+        return set()
+        
+    # Restituisce il set più piccolo tra quelli validi
+    return set(min(backdoor_sets, key=len))
 
 
 def do_query(
@@ -166,12 +163,7 @@ def do_query(
     df: pd.DataFrame,
     intervention: dict[str, Any],
 ) -> dict[str, Any]:
-    """Estimate P(Y|do(X=x)) using SCM-based g-computation.
-
-    The estimate is computed by clamping intervention variables and propagating
-    descendants through fitted structural equations while averaging over the
-    empirical distribution of non-intervened variables.
-    """
+    """Estimate P(Y|do(X=x)) using SCM-based g-computation."""
     if not scm.fitted:
         raise RuntimeError("SCM must be fitted before calling do_query")
     if len(df) == 0:
@@ -225,11 +217,7 @@ def build_intervention_dataset(
     df: pd.DataFrame,
     interventions: list[dict[str, Any]],
 ) -> pd.DataFrame:
-    """Generate a synthetic intervention dataset from observed rows.
-
-    This function applies clamped interventions to each row and appends metadata
-    columns to track source example and intervention specification.
-    """
+    """Generate a synthetic intervention dataset from observed rows."""
     if len(df) == 0:
         raise ValueError("df cannot be empty")
     if not interventions:
