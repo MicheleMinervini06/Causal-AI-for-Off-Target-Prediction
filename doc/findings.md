@@ -175,3 +175,15 @@ e usare test stratificati per assay/source o reweighting dei negativi prima di c
 - [ ] **Fase 2-bis:** quantificare esplicitamente il bias Cas-OFFinder (analisi separata positivi/negativi e per assay)
 - [ ] **Fase 2-bis:** ripetere CI tests con campionamento negativo controllato o reweighting
 - [ ] **Fase 3:** verificare se il Neural SCM risolve il calo cross-assay (F1)
+
+### F6.6 — Confronto: default DAG vs variante con arco mismatch_rate → label
+
+La modifica del DAG che aggiunge l'arco diretto `mismatch_rate → label` non porta benefici rilevanti sugli esiti sperimentali. I segnali principali sono i seguenti:
+
+- Il CI failure rate scende da 0.889 a 0.875 — un miglioramento di 1.4 punti percentuali su un failure rate dell'87%. Non è statisticamente o praticament rilevante.
+- Il delta osservazionale vs interventale cambia di circa 0.0003 — compatibile con rumore statistico.
+- L'aspetto più notevole è che il fit per la variante assegna `activity_eta_mismatch ≈ -30`, ovvero un peso estremamente grande a `mismatch_rate`.
+
+Questa grandezza dei coefficienti è coerente con un problema di collinearità: `mismatch_rate` è una funzione di `node_B_proximal` e `node_C_seed_extension`, quindi l'aggiunta dell'arco introduce ridondanza informativa che il fitting compensa con coefficienti estremi invece di migliorare la rappresentazione causalmente.
+
+Conclusione: la variante non migliora la qualità causale o predittiva degli esperimenti. Il DAG originale (senza l'arco diretto `mismatch_rate → label`) è preferibile per parsimonia: cattura l'informazione necessaria tramite i nodi esistenti e evita ridondanze che portano a stime instabili. Non portare questa modifica in Fase 3; il risultato è comunque un finding utile che conferma come i segnali evidenziati dai test di indipendenza siano riconducibili a informazioni ridondanti nei nodi già presenti, non alla necessità di un arco esplicito.

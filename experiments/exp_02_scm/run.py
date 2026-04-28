@@ -15,7 +15,11 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 from dag.independence_tests import validate_dag_implications
-from dag.do_calculus import compare_observational_vs_interventional, build_intervention_dataset
+from dag.do_calculus import (
+    compare_observational_vs_interventional,
+    build_intervention_dataset,
+    ALTERNATE_DAG_MISMATCH_LABEL,
+)
 from dag.scm import CRISPRCausalModel
 from dag.nodes import CRISPRPairFeatures
 from evaluation.ccs import calculate_ccs
@@ -34,14 +38,21 @@ def load_config(path: Path) -> dict:
     with path.open(encoding="utf-8") as f:
         cfg = yaml.safe_load(f) or {}
 
-    if "_base" in cfg:
-        base_path = ROOT / cfg.pop("_base")
+    # Resolve chained `_base` entries recursively so configs can inherit multi-level
+    # (e.g. config.yaml -> experiments/configs/base.yaml).
+    cur = cfg
+    while isinstance(cur, dict) and "_base" in cur:
+        base_rel = cur.pop("_base")
+        base_path = ROOT / base_rel
+        if not base_path.exists():
+            raise FileNotFoundError(f"Base config not found: {base_path}")
         with base_path.open(encoding="utf-8") as f:
             base = yaml.safe_load(f) or {}
-        _deep_merge(base, cfg)
-        cfg = base
+        # Merge current overrides into base
+        _deep_merge(base, cur)
+        cur = base
 
-    return cfg
+    return cur
 
 
 def _deep_merge(base: dict, override: dict) -> None:
@@ -228,7 +239,10 @@ def _run_intervention_dataset(
 def main(config_path: Path) -> None:
     cfg = load_config(config_path)
 
-    results_dir = ROOT / cfg["logging"]["results_dir"] / cfg["experiment"]["name"]
+    logging_cfg = cfg.get("logging") or {}
+    results_root = logging_cfg.get("results_dir", "experiments/results/")
+    results_dir = Path(results_root) if Path(results_root).is_absolute() else ROOT / results_root
+    results_dir = results_dir / cfg.get("experiment", {}).get("name", "exp_02_scm")
     results_dir.mkdir(parents=True, exist_ok=True)
     log.info("Output dir: %s", results_dir)
 
@@ -252,7 +266,13 @@ def main(config_path: Path) -> None:
 
     # 1) Independence tests (DAG misspecification gate)
     alpha = float(indep_cfg.get("alpha", 0.05))
-    dag_report = validate_dag_implications(None, df_indep, alpha=alpha)
+    dag_variant_name = str(phase2_cfg.get("dag_variant", "default") or "default")
+    if dag_variant_name == "mismatch_label":
+        dag_spec = ALTERNATE_DAG_MISMATCH_LABEL
+    else:
+        dag_spec = None
+
+    dag_report = validate_dag_implications(dag_spec, df_indep, alpha=alpha)
 
     independence_csv = results_dir / cfg.get("output", {}).get("independence_csv", "dag_independence_tests.csv")
     dag_report.to_csv(independence_csv, index=False)

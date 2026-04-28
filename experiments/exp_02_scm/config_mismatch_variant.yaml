@@ -1,0 +1,12 @@
+_base: experiments/exp_02_scm/config.yaml
+
+experiment:
+  name: exp_02_scm_mismatch_variant
+
+phase2:
+  dag_variant: mismatch_label
+
+# If you want a different results root, set `logging.results_dir` here.
+# Example:
+# logging:
+#   results_dir: experiments/results/exp_02_scm_alternative
