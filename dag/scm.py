@@ -137,7 +137,7 @@ class CRISPRCausalModel:
     Equations (Simplified DAG):
     1) pam_score <- alpha * node_A_pam                    (multiplicative)
     2) mismatch_rate <- linear(node_B, node_C)            (linear)
-    3) label <- sigmoid(pam, node_B, node_C)              (sigmoid)
+    3) label <- sigmoid(pam, mismatch_rate, node_B, node_C) (sigmoid)
     """
 
     pam_equation: StructuralEquation = field(
@@ -158,8 +158,8 @@ class CRISPRCausalModel:
     activity_equation: StructuralEquation = field(
         default_factory=lambda: StructuralEquation(
             target="label",
-            # Rimosso node_D_non_seed
-            parents=["pam_score", "node_B_proximal", "node_C_seed_extension"],
+            # Revisione DAG parziale: mismatch_rate entra direttamente nel label
+            parents=["pam_score", "mismatch_rate", "node_B_proximal", "node_C_seed_extension"],
             form="sigmoid",
         )
     )
@@ -202,8 +202,9 @@ class CRISPRCausalModel:
             "mismatch_gamma_seed": float(self.mismatch_equation.coefficients[1]),
             "activity_intercept": float(self.activity_equation.intercept),
             "activity_delta_pam": float(self.activity_equation.coefficients[0]),
-            "activity_eta_proximal": float(self.activity_equation.coefficients[1]),
-            "activity_theta_seed": float(self.activity_equation.coefficients[2]),
+            "activity_eta_mismatch": float(self.activity_equation.coefficients[1]),
+            "activity_zeta_proximal": float(self.activity_equation.coefficients[2]),
+            "activity_theta_seed": float(self.activity_equation.coefficients[3]),
         }
 
     def _pair_to_state(self, pair: CRISPRPairFeatures | Mapping[str, float] | tuple[str, str]) -> dict[str, float]:

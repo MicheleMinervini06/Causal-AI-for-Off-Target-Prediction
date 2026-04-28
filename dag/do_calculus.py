@@ -14,6 +14,7 @@ from dag.scm import CRISPRCausalModel
 
 
 # Fix: DAG potato in perfetta coerenza con scm.py (rimossi energia e non-seed)
+# Default DAG (original): label depends on pam_score and node features (no direct mismatch_rate)
 DEFAULT_DAG: dict[str, list[str]] = {
     "pam_score": ["node_A_pam"],
     "mismatch_rate": [
@@ -21,6 +22,13 @@ DEFAULT_DAG: dict[str, list[str]] = {
         "node_C_seed_extension",
     ],
     "label": ["pam_score", "node_B_proximal", "node_C_seed_extension"],
+}
+
+# Alternate DAG variant that includes mismatch_rate as a direct parent of label
+ALTERNATE_DAG_MISMATCH_LABEL: dict[str, list[str]] = {
+    "pam_score": ["node_A_pam"],
+    "mismatch_rate": ["node_B_proximal", "node_C_seed_extension"],
+    "label": ["pam_score", "mismatch_rate", "node_B_proximal", "node_C_seed_extension"],
 }
 
 
