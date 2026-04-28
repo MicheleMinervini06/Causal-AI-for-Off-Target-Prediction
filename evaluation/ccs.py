@@ -1,7 +1,6 @@
 import numpy as np
 from typing import Callable, Literal
 
-
 def _to_proba_1d(values: np.ndarray) -> np.ndarray:
     arr = np.asarray(values, dtype=float)
     if arr.ndim == 2:
@@ -145,5 +144,94 @@ def calculate_ccs(
         # --- Calcolo CCS Aggiornato per 6 regole ---
         pass_all_6 = (pass_all_3 & r4_pass & r5_pass & r6_pass)
         results["CCS_Overall"] = np.mean(pass_all_6)
+
+    return results
+
+def calculate_ccs_neural(
+    model,
+    unique_guides: list[str],
+    mode: Literal["3_rules", "6_rules"] = "3_rules",
+) -> dict:
+    """
+    CCS per Neural SCM usando do() nativo sui nodi del DAG.
+
+    Differenza rispetto a calculate_ccs():
+        - Gli interventi operano direttamente sui nodi del DAG
+          dopo l'encoding, non sulle sequenze grezze.
+        - Elimina il rumore introdotto dalla re-codifica
+          di sequenze mutate sinteticamente.
+
+    Regole:
+        R1: do(pam_gate=0.1)    → activity scende     [nodo A]
+        R2: do(proximal=1.0)    → activity scende     [nodo B]
+        R3: do(seed=0.0)        → activity sale       [nodo C]
+        R4: do(proximal=1.0) < do(nonseed=1.0)        [nodo B vs D]
+        R5: do(seed=0.75) < do(seed=0.4)              [monotonicità nodo C]
+        R6: do(pam_gate=1.0) > do(pam_gate=0.2) > do(pam_gate=0.1)  [gerarchia nodo A]
+    """
+    
+    try:
+        import torch
+    except ImportError:
+        raise ImportError("PyTorch is required for calculate_ccs_neural. Please install it to use this function.")
+    
+    if not unique_guides:
+        raise ValueError("unique_guides cannot be empty")
+
+    guides  = [g[:20].upper() for g in unique_guides]
+    targets = [g + "AGG" for g in guides]
+
+    def _do(intervention: dict) -> np.ndarray:
+        with torch.no_grad():
+            out = model.do(guides, targets, intervention)
+        return out["activity_probability"].squeeze(-1).cpu().numpy()
+
+    # Baseline osservazionale
+    with torch.no_grad():
+        out_base = model.forward(guides, targets)
+    p_base = out_base["activity_probability"].squeeze(-1).cpu().numpy()
+
+    # ── R1: PAM ablation ─────────────────────────────────────────────
+    r1_pass = (_do({"pam_gate": 0.1}) < p_base).astype(int)
+
+    # ── R2: massima penalità PAM-proximal ────────────────────────────
+    r2_pass = (_do({"proximal": 1.0}) < p_base).astype(int)
+
+    # ── R3: seed perfetta → activity sale ────────────────────────────
+    r3_pass = (_do({"seed": 0.0}) > p_base).astype(int)
+
+    results = {
+        "R1_PAM_Ablation":  float(np.mean(r1_pass)),
+        "R2_Pos1_Mismatch": float(np.mean(r2_pass)),
+        "R3_Heal_Seed":     float(np.mean(r3_pass)),
+        "CCS_Overall":      float(np.mean(r1_pass & r2_pass & r3_pass)),
+        "method":           "neural_do",
+    }
+
+    if mode == "6_rules":
+        # ── R4: seed penalizza più di non-seed ───────────────────────
+        p_prox_stress   = _do({"proximal": 1.0})
+        p_nonseed_stress = _do({"non_seed": 1.0})
+        r4_pass = (p_prox_stress < p_nonseed_stress).astype(int)
+
+        # ── R5: monotonicità nodo C (alta energia > bassa energia) ───
+        p_seed_high = _do({"seed": 0.75})
+        p_seed_low  = _do({"seed": 0.40})
+        r5_pass = (p_seed_high < p_seed_low).astype(int)
+
+        # ── R6: gerarchia PAM NGG > NAG > NCG ────────────────────────
+        p_ngg = _do({"pam_gate": 1.00})
+        p_nag = _do({"pam_gate": 0.20})
+        p_ncg = _do({"pam_gate": 0.10})
+        r6_pass = ((p_ngg > p_nag) & (p_nag > p_ncg)).astype(int)
+
+        results.update({
+            "R4_Seed_vs_NonSeed":  float(np.mean(r4_pass)),
+            "R5_Wobble_vs_Transv": float(np.mean(r5_pass)),
+            "R6_PAM_Hierarchy":    float(np.mean(r6_pass)),
+            "CCS_Overall":         float(np.mean(
+                r1_pass & r2_pass & r3_pass & r4_pass & r5_pass & r6_pass
+            )),
+        })
 
     return results
