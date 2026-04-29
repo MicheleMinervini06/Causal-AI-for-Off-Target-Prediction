@@ -106,9 +106,8 @@ def calculate_ccs(
     r3_pass = (p_dirty_seed < p_baseline).astype(int)
     results["R3_Heal_Seed"] = np.mean(r3_pass)
 
-    # --- Calcolo CCS per 3 regole ---
-    pass_all_3 = (r1_pass & r2_pass & r3_pass)
-    results["CCS_Overall"] = np.mean(pass_all_3)
+    # --- CCS finale: media dei punteggi per regola ---
+    results["CCS_Overall"] = float(np.mean([results["R1_PAM_Ablation"], results["R2_Pos1_Mismatch"], results["R3_Heal_Seed"]]))
 
     if mode == "6_rules":
         # ==========================================
@@ -141,9 +140,15 @@ def calculate_ccs(
         r6_pass = ((p_baseline > p_nag) & (p_nag > p_ncg)).astype(int)
         results["R6_PAM_Hierarchy"] = np.mean(r6_pass)
 
-        # --- Calcolo CCS Aggiornato per 6 regole ---
-        pass_all_6 = (pass_all_3 & r4_pass & r5_pass & r6_pass)
-        results["CCS_Overall"] = np.mean(pass_all_6)
+        # --- CCS finale: media di tutte le regole disponibili ---
+        results["CCS_Overall"] = float(np.mean([
+            results["R1_PAM_Ablation"],
+            results["R2_Pos1_Mismatch"],
+            results["R3_Heal_Seed"],
+            results["R4_Seed_vs_NonSeed"],
+            results["R5_Wobble_vs_Transv"],
+            results["R6_PAM_Hierarchy"],
+        ]))
 
     return results
 
@@ -169,7 +174,7 @@ def calculate_ccs_neural(
         R5: do(seed=0.75) < do(seed=0.4)              [monotonicità nodo C]
         R6: do(pam_gate=1.0) > do(pam_gate=0.2) > do(pam_gate=0.1)  [gerarchia nodo A]
     """
-    
+
     try:
         import torch
     except ImportError:
@@ -204,7 +209,11 @@ def calculate_ccs_neural(
         "R1_PAM_Ablation":  float(np.mean(r1_pass)),
         "R2_Pos1_Mismatch": float(np.mean(r2_pass)),
         "R3_Heal_Seed":     float(np.mean(r3_pass)),
-        "CCS_Overall":      float(np.mean(r1_pass & r2_pass & r3_pass)),
+        "CCS_Overall":      float(np.mean([
+            np.mean(r1_pass),
+            np.mean(r2_pass),
+            np.mean(r3_pass),
+        ])),
         "method":           "neural_do",
     }
 
@@ -229,9 +238,14 @@ def calculate_ccs_neural(
             "R4_Seed_vs_NonSeed":  float(np.mean(r4_pass)),
             "R5_Wobble_vs_Transv": float(np.mean(r5_pass)),
             "R6_PAM_Hierarchy":    float(np.mean(r6_pass)),
-            "CCS_Overall":         float(np.mean(
-                r1_pass & r2_pass & r3_pass & r4_pass & r5_pass & r6_pass
-            )),
+            "CCS_Overall":         float(np.mean([
+                np.mean(r1_pass),
+                np.mean(r2_pass),
+                np.mean(r3_pass),
+                np.mean(r4_pass),
+                np.mean(r5_pass),
+                np.mean(r6_pass),
+            ])),
         })
 
     return results
