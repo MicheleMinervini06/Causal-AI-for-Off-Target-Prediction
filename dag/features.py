@@ -5,6 +5,7 @@ from typing import Iterable
 import h5py
 import numpy as np
 import pandas as pd
+from sklearn.model_selection import train_test_split  # Aggiunto per la stratificazione rigorosa
 from tqdm import tqdm
 
 from dag.nodes import CRISPRPairFeatures
@@ -151,6 +152,11 @@ def create_guide_split(
     test_size: float = 0.15,
     seed: int = 42,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """
+    Esegue uno split guidato stratificando le guide in base alla 
+    loro promiscuità (numero di off-target positivi) per evitare target leakage
+    e mantenere un class imbalance omogeneo tra i fold.
+    """
     if not np.isclose(train_size + val_size + test_size, 1.0):
         raise ValueError("train_size + val_size + test_size must sum to 1.0")
 
@@ -158,35 +164,62 @@ def create_guide_split(
     if "guide_name" not in split_df.columns:
         split_df["guide_name"] = split_df["sgRNA_seq"].astype(str)
 
-    unique_guides = np.asarray(sorted(split_df["guide_name"].astype(str).unique()))
-    if len(unique_guides) < 3:
+    # 1. Calcolo livello di attività per guida
+    guide_stats = split_df.groupby("guide_name")["label"].sum().reset_index()
+    guide_stats.rename(columns={"label": "n_positives"}, inplace=True)
+
+    if len(guide_stats) < 3:
         raise ValueError("At least 3 unique guides are required to build train/val/test splits")
 
-    rng = np.random.default_rng(seed)
-    shuffled = rng.permutation(unique_guides)
+    # 2. Stratificazione per quartili
+    try:
+        guide_stats["activity_bin"] = pd.qcut(
+            guide_stats["n_positives"], 
+            q=4, 
+            labels=["specific", "low_promiscuity", "med_promiscuity", "high_promiscuity"]
+        )
+    except ValueError:
+        # Fallback robusto se le frequenze si accavallano troppo
+        guide_stats["activity_bin"] = pd.cut(
+            guide_stats["n_positives"], 
+            bins=4, 
+            labels=["specific", "low_promiscuity", "med_promiscuity", "high_promiscuity"]
+        )
 
-    n_guides = len(shuffled)
-    n_train = max(1, int(np.floor(train_size * n_guides)))
-    n_val = max(1, int(np.floor(val_size * n_guides)))
-    n_test = n_guides - n_train - n_val
+    # 3. Split Train+Val vs Test
+    train_val_guides, test_guides = train_test_split(
+        guide_stats["guide_name"], 
+        test_size=test_size, 
+        random_state=seed, 
+        stratify=guide_stats["activity_bin"]
+    )
+    
+    # 4. Split Train vs Val
+    val_relative_size = val_size / (train_size + val_size)
+    train_val_stats = guide_stats[guide_stats["guide_name"].isin(train_val_guides)]
+    
+    train_guides, val_guides = train_test_split(
+        train_val_stats["guide_name"], 
+        test_size=val_relative_size, 
+        random_state=seed, 
+        stratify=train_val_stats["activity_bin"]
+    )
 
-    if n_test <= 0:
-        n_test = 1
-        if n_train > n_val:
-            n_train -= 1
-        else:
-            n_val -= 1
-
-    train_guides = set(shuffled[:n_train])
-    val_guides = set(shuffled[n_train : n_train + n_val])
-    test_guides = set(shuffled[n_train + n_val : n_train + n_val + n_test])
-
-    if (train_guides & val_guides) or (train_guides & test_guides) or (val_guides & test_guides):
-        raise RuntimeError("Guide leakage detected while building splits")
-
+    # 5. Estrazione DataFrame
     train_df = split_df[split_df["guide_name"].isin(train_guides)].reset_index(drop=True)
     val_df = split_df[split_df["guide_name"].isin(val_guides)].reset_index(drop=True)
     test_df = split_df[split_df["guide_name"].isin(test_guides)].reset_index(drop=True)
+
+    # 6. Logging dei risultati dello split per verifica dell'Imbalance
+    print("\n--- Stratified Split Diagnostics ---")
+    for name, sub_df in zip(["train", "val", "test"], [train_df, val_df, test_df]):
+        n_pos = sub_df["label"].sum()
+        n_guides = sub_df["guide_name"].nunique()
+        ratio = n_pos / n_guides if n_guides > 0 else 0
+        imbalance = (len(sub_df) - n_pos) / n_pos if n_pos > 0 else 0
+        print(f"Split {name.ljust(5)} | Guide: {n_guides:3d} | Positivi: {int(n_pos):5d} | Pos/Guida: {ratio:6.1f} | Imbalance: {imbalance:5.1f}x")
+    print("------------------------------------\n")
+
     return train_df, val_df, test_df
 
 
