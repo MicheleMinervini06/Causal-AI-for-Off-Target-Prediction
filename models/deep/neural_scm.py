@@ -4,6 +4,7 @@ from typing import Any
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from .encoding import PairwiseTokenEncoder
 from .modules import NonSeedModule, PAMModule, ProximalModule, SeedExtensionModule
@@ -72,8 +73,13 @@ class NeuralSCM(nn.Module):
         else:
             s_nonseed, repr_nonseed = self.nonseed_node(x_spacer)
 
-        # --- Equazione Strutturale Combinata ---
-        logit = (s_prox * self.w_proximal) + (s_seed * self.w_seed) + (s_nonseed * self.w_nonseed) + self.bias
+        # --- Equazione Strutturale Combinata (HARD CONSTRAINTS) ---
+        # Riparametrizziamo i parametri grezzi affinché agiscano SOLO come penalità termodinamiche (w <= 0)
+        w_prox_eff = -F.softplus(self.w_proximal)
+        w_seed_eff = -F.softplus(self.w_seed)
+        w_nonseed_eff = -F.softplus(self.w_nonseed)
+
+        logit = (s_prox * w_prox_eff) + (s_seed * w_seed_eff) + (s_nonseed * w_nonseed_eff) + self.bias
         activity_prob = pam_gate * torch.sigmoid(logit)
 
         return {

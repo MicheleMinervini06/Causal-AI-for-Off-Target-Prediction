@@ -7,6 +7,7 @@ from typing import Any
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from sklearn.metrics import average_precision_score, f1_score, roc_auc_score
 from torch.utils.data import DataLoader
 
@@ -187,13 +188,15 @@ def train(
             f"Val AUPRC: {current_auprc:.4f} | Val AUROC: {val_metrics['auroc']:.4f}"
         )
 
-        # Log combiner weights after each epoch for monitoring
-        w_prox = float(getattr(model, "w_proximal").detach().cpu())
-        w_seed = float(getattr(model, "w_seed").detach().cpu())
-        w_nonseed = float(getattr(model, "w_nonseed").detach().cpu())
-        bias = float(getattr(model, "bias").detach().cpu())
+        # Calcolo dei pesi effettivi per il logging (applichiamo softplus per garantire negatività se usato)
+        w_prox_eff = -F.softplus(getattr(model, "w_proximal")).detach().cpu().item()
+        w_seed_eff = -F.softplus(getattr(model, "w_seed")).detach().cpu().item()
+        w_nonseed_eff = -F.softplus(getattr(model, "w_nonseed")).detach().cpu().item()
+        bias_eff = float(getattr(model, "bias").detach().cpu().item())
+
         logger.info(
-            f"  Combiner: w_prox={w_prox:.4f} w_seed={w_seed:.4f} w_nonseed={w_nonseed:.4f} bias={bias:.4f}"
+            f"  Combiner (Effettivi): w_prox={w_prox_eff:.4f} "
+            f"w_seed={w_seed_eff:.4f} w_nonseed={w_nonseed_eff:.4f} bias={bias_eff:.4f}"
         )
 
         if current_auprc > best_auprc:
