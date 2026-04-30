@@ -21,6 +21,8 @@ from evaluation.ccs import calculate_ccs_neural
 from models.deep import NeuralSCM, train
 from models.deep.train import evaluate
 
+from models.utils.tracking import ExperimentTracker
+
 log = logging.getLogger(__name__)
 
 
@@ -227,8 +229,12 @@ def main(config_path: Path) -> None:
     
     train_loader = _make_loader(df_train, batch_size, shuffle=True)
     val_loader = _make_loader(df_val, batch_size, shuffle=False)
+    
+    # Optional: Initialize experiment tracker (e.g., Weights & Biases) se configurato
+    use_tracking = cfg.get("tracking", {}).get("enabled", False)
+    tracker = ExperimentTracker(config=cfg, enabled=use_tracking)
 
-    trained_model = train(model, train_loader, val_loader, training_cfg)
+    trained_model = train(model, train_loader, val_loader, training_cfg, tracker=tracker)
 
     model_path = results_dir / str(cfg.get("output", {}).get("model_pt", "neural_scm.pt"))
     torch.save(trained_model.state_dict(), model_path)
@@ -259,6 +265,8 @@ def main(config_path: Path) -> None:
         {"split": "changeseq_test", **_safe_float_dict(test_metrics)},
         results_dir / str(cfg.get("output", {}).get("metrics_changeseq_json", "metrics_changeseq.json")),
     )
+    if tracker is not None:
+        tracker.log_metrics({f"changeseq_{k}": v for k, v in test_metrics.items()})
 
     # 5. Evaluate cross-assay (GUIDE-seq)
     guideseq_path = ROOT / cfg.get("data", {}).get("guideseq_features", "")
@@ -272,6 +280,8 @@ def main(config_path: Path) -> None:
             {"split": "guideseq", **_safe_float_dict(guide_metrics)},
             out_guideseq,
         )
+        if tracker is not None:
+            tracker.log_metrics({f"guideseq_{k}": v for k, v in guide_metrics.items()})
     else:
         log.warning("GUIDE-seq features not found at %s; skipping cross-assay", guideseq_path)
         _save_json({"status": "skipped", "reason": f"not found: {guideseq_path}"}, out_guideseq)

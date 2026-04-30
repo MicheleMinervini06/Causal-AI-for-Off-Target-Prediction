@@ -143,6 +143,7 @@ def train(
     train_loader: DataLoader,
     val_loader: DataLoader,
     config: dict[str, Any],
+    tracker: Any | None = None,
 ) -> nn.Module:
     """
     Main training loop con Early Stopping, salvataggio dei pesi migliori e logging.
@@ -168,6 +169,10 @@ def train(
 
     logger.info(f"Inizio addestramento. Device: {device}, Epoche: {epochs}")
 
+    if tracker is not None:
+        tracker.watch_model(model)
+        logger.info("Integrazione con tracker attiva.")
+
     for epoch in range(epochs):
         train_metrics = train_epoch(
             model=model,
@@ -187,6 +192,20 @@ def train(
             f"(P:{train_metrics['train_pred_loss']:.4f} C:{train_metrics['train_causal_loss']:.4f}) | "
             f"Val AUPRC: {current_auprc:.4f} | Val AUROC: {val_metrics['auroc']:.4f}"
         )
+
+        # Logging su tracker (se presente)
+        if tracker is not None:
+            tracker.log_metrics({
+                "epoch": epoch + 1,
+                "train/loss_total": train_metrics.get("train_loss", 0.0),
+                "train/loss_pred": train_metrics.get("train_pred_loss", 0.0),
+                "train/loss_causal": train_metrics.get("train_causal_loss", 0.0),
+                "train/loss_consist": train_metrics.get("train_consist_loss", 0.0),
+                "val/auprc": val_metrics.get("auprc", 0.0),
+                "val/auroc": val_metrics.get("auroc", 0.0),
+                "val/f1_score": val_metrics.get("f1", 0.0),
+                "system/learning_rate": optimizer.param_groups[0]["lr"]
+            })
 
         # Calcolo dei pesi effettivi per il logging (applichiamo softplus per garantire negatività se usato)
         w_prox_eff = -F.softplus(getattr(model, "w_proximal")).detach().cpu().item()
