@@ -13,17 +13,23 @@ class ExperimentTracker:
         if self.enabled:
             try:
                 import wandb
-                # Estraiamo il nome dell'esperimento dal config per organizzare la dashboard
                 exp_name = config.get("experiment", {}).get("name", "neural_scm_run")
-                
+
                 wandb.init(
                     project="crispr-causal-scm",
                     name=exp_name,
-                    config=config
+                    config=config,
+                    settings=wandb.Settings(start_method="thread"),
                 )
                 log.info("W&B Tracker inizializzato. Dashboard attiva.")
             except ImportError:
                 log.warning("Libreria 'wandb' non trovata. Esegui 'uv add wandb'. Tracking disabilitato.")
+                self.enabled = False
+            except OSError as exc:
+                log.warning("W&B non si è avviato su questo sistema (%s). Tracking disabilitato.", exc)
+                self.enabled = False
+            except Exception as exc:
+                log.warning("W&B init fallito (%s). Tracking disabilitato.", exc)
                 self.enabled = False
 
     def watch_model(self, model: Any):

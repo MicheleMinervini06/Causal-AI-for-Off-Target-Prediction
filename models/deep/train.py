@@ -8,6 +8,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.optim.lr_scheduler import OneCycleLR
 from sklearn.metrics import average_precision_score, f1_score, roc_auc_score
 from torch.utils.data import DataLoader
 
@@ -22,6 +23,7 @@ def train_epoch(
     optimizer: torch.optim.Optimizer,
     loss_fn: NeuralSCMLoss,
     device: torch.device,
+    scheduler: Any | None = None,
 ) -> dict[str, float]:
     """
     Esegue una singola epoca di addestramento.
@@ -83,6 +85,13 @@ def train_epoch(
         # Gradient Clipping per stabilizzare i Transformer
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
+        if scheduler is not None:
+            # OneCycleLR.step() should be called after each optimizer.step()
+            try:
+                scheduler.step()
+            except Exception:
+                # Non-fatal: se lo scheduler non supporta step(), ignoriamo
+                pass
 
         total_loss += loss.item()
         total_pred += loss_dict["loss_pred"].item()
@@ -100,7 +109,7 @@ def train_epoch(
 
 @torch.no_grad()
 def evaluate(
-    model: nn.Module, 
+    model: Any, 
     loader: DataLoader, 
     device: torch.device
 ) -> dict[str, float]:
@@ -163,6 +172,21 @@ def train(
     
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
 
+    # Scheduler OneCycleLR: warmup + annealing per-iterazione
+    try:
+        scheduler = OneCycleLR(
+            optimizer,
+            max_lr=lr,
+            steps_per_epoch=len(train_loader),
+            epochs=epochs,
+            pct_start=config.get("pct_start", 0.1),
+            cycle_momentum=False,
+        )
+        logger.info("OneCycleLR scheduler attivato: max_lr=%.6f pct_start=%.2f", lr, config.get("pct_start", 0.1))
+    except Exception as e:
+        scheduler = None
+        logger.warning("Impossibile istanziare OneCycleLR: %s. Continuo senza scheduler.", e)
+
     best_auprc = -1.0
     best_model_state = None
     epochs_without_improvement = 0
@@ -170,8 +194,7 @@ def train(
     logger.info(f"Inizio addestramento. Device: {device}, Epoche: {epochs}")
 
     if tracker is not None:
-        tracker.watch_model(model)
-        logger.info("Integrazione con tracker attiva.")
+        logger.info("Tracker inizializzato - metriche verranno loggiate.")
 
     for epoch in range(epochs):
         train_metrics = train_epoch(
@@ -180,6 +203,7 @@ def train(
             optimizer=optimizer,
             loss_fn=loss_fn,
             device=device,
+            scheduler=scheduler,
         )
         
         val_metrics = evaluate(model, val_loader, device)
@@ -211,7 +235,12 @@ def train(
         w_prox_eff = -F.softplus(getattr(model, "w_proximal")).detach().cpu().item()
         w_seed_eff = -F.softplus(getattr(model, "w_seed")).detach().cpu().item()
         w_nonseed_eff = -F.softplus(getattr(model, "w_nonseed")).detach().cpu().item()
-        bias_eff = float(getattr(model, "bias").detach().cpu().item())
+        # Applichiamo lo stesso clamp usato nel modello per coerenza visiva
+        try:
+            bias_eff = float(torch.clamp(getattr(model, "bias"), min=-4.0, max=3.0).detach().cpu().item())
+        except Exception:
+            # Fallback: se qualcosa va storto leggiamo il valore grezzo
+            bias_eff = float(getattr(model, "bias").detach().cpu().item())
 
         logger.info(
             f"  Combiner (Effettivi): w_prox={w_prox_eff:.4f} "
