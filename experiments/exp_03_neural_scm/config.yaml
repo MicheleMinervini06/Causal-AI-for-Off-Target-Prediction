@@ -22,8 +22,8 @@ training:
   epochs: 50
   patience: 99 # Disabilita early stopping per garantire un confronto completo
   pos_weight: 162.0  # Imbalance ratio di CHANGE-seq
-  lambda_causal: 0.5
-  lambda_consist: 0.5
+  lambda_causal: 0.1
+  lambda_consist: 0.1
 
 phase3:
   fit_split: train
@@ -48,3 +48,6 @@ output:
   metrics_guideseq_json: metrics_guideseq.json
   ccs_neural_json: ccs_neural.json
   ccs_comparison_json: ccs_comparison.json
+
+tracking:
+  enabled: false  
