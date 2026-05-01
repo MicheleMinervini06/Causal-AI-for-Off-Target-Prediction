@@ -73,13 +73,28 @@ class NeuralSCM(nn.Module):
         else:
             s_nonseed, repr_nonseed = self.nonseed_node(x_spacer)
 
-        # --- Equazione Strutturale Combinata (HARD CONSTRAINTS) ---
-        # Riparametrizziamo i parametri grezzi affinché agiscano SOLO come penalità termodinamiche (w <= 0)
+        # --- NORMALIZZAZIONE BIOLOGICA DELLE RAPPRESENTAZIONI ---
+        # 1. Il PAM Gate DEVE essere una probabilità [0, 1] (AND logico)
+        pam_gate = torch.sigmoid(pam_gate)
+
+        # 2. Le penalità energetiche NON POSSONO essere negative. 
+        # Usiamo ReLU: 0 = sequenza perfetta, >0 = danno da mismatch.
+        s_prox = F.relu(s_prox)
+        s_seed = F.relu(s_seed)
+        s_nonseed = F.relu(s_nonseed)
+
+        # --- Equazione Strutturale Combinata (HARD CONSTRAINTS TOTALI) ---
+        # 1. Pesi termodinamici: SOLO penalità (w <= 0)
         w_prox_eff = -F.softplus(self.w_proximal)
         w_seed_eff = -F.softplus(self.w_seed)
         w_nonseed_eff = -F.softplus(self.w_nonseed)
 
-        logit = (s_prox * w_prox_eff) + (s_seed * w_seed_eff) + (s_nonseed * w_nonseed_eff) + self.bias
+        # 2. Bias biologico: L'attività basale non può essere < 1% o > 99.3%
+        # Usiamo clamp sul tensore del parametro per limitarne l'influenza
+        bias_eff = torch.clamp(self.bias, min=-4.0, max=3.0)
+
+        # 3. Logit combinato
+        logit = (s_prox * w_prox_eff) + (s_seed * w_seed_eff) + (s_nonseed * w_nonseed_eff) + bias_eff
         activity_prob = pam_gate * torch.sigmoid(logit)
 
         return {
