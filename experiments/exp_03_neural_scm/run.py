@@ -20,6 +20,7 @@ sys.path.insert(0, str(ROOT))
 from evaluation.ccs import calculate_ccs_neural
 from models.deep import NeuralSCM, train
 from models.deep.train import evaluate
+from models.deep.encoding import PairwiseTokenEncoder, BiologicalMismatchEncoder
 
 from models.utils.tracking import ExperimentTracker
 
@@ -219,9 +220,20 @@ def main(config_path: Path) -> None:
     log.info("Using device: %s", device)
 
     model_cfg = cfg.get("model", {})
+    
+    # Istanzia l'encoder scelto dal config
+    encoder_type = str(model_cfg.get("encoder", "pairwise")).lower()
+    if encoder_type == "biological_mismatch":
+        encoder = BiologicalMismatchEncoder()
+        log.info("Using BiologicalMismatchEncoder (embed_dim=12)")
+    else:  # default: pairwise
+        encoder = PairwiseTokenEncoder(embed_dim=int(model_cfg.get("embed_dim", 16)))
+        log.info("Using PairwiseTokenEncoder (embed_dim=%d)", encoder.embed_dim)
+    
     model = NeuralSCM(
         embed_dim=int(model_cfg.get("embed_dim", 16)),
         hidden_dim=int(model_cfg.get("hidden_dim", 32)),
+        encoder=encoder,
     ).to(device)
 
     # 3. Train and save best model
