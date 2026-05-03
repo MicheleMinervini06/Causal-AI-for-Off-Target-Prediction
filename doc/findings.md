@@ -220,3 +220,49 @@ La modifica del DAG che aggiunge l'arco diretto `mismatch_rate → label` non po
 Questa grandezza dei coefficienti è coerente con un problema di collinearità: `mismatch_rate` è una funzione di `node_B_proximal` e `node_C_seed_extension`, quindi l'aggiunta dell'arco introduce ridondanza informativa che il fitting compensa con coefficienti estremi invece di migliorare la rappresentazione causalmente.
 
 Conclusione: la variante non migliora la qualità causale o predittiva degli esperimenti. Il DAG originale (senza l'arco diretto `mismatch_rate → label`) è preferibile per parsimonia: cattura l'informazione necessaria tramite i nodi esistenti e evita ridondanze che portano a stime instabili. Non portare questa modifica in Fase 3; il risultato è comunque un finding utile che conferma come i segnali evidenziati dai test di indipendenza siano riconducibili a informazioni ridondanti nei nodi già presenti, non alla necessità di un arco esplicito.
+
+---
+
+## Fase 3 — Neural SCM: deep complesso vs bypass lineare
+
+### F7 — La complessità deep induce overfitting severo; il bypass lineare semplificato migliora la generalizzazione
+
+**Esperimento:** `Exp04_LinearBypass_HardPrior` (encoder biologico + bypass lineare delle regioni mismatch, training con Focal Loss, OneCycleLR, 5 epoche).
+
+**Setup rilevante:**
+
+- split: train=2,925,972 / val=842,659 / test=582,999
+- imbalance train: `pos_weight = 46.3`
+- device: CUDA
+- encoder: `BiologicalMismatchEncoder (embed_dim=12)`
+- combinatore strutturale con pochi gradi di libertà (assetto semplificato):
+  - `w_proximal`, `w_seed`, `w_nonseed`, `bias` + gate PAM
+
+**Risultati Exp04:**
+
+| Split | AUPRC | AUROC | F1 |
+|---|---:|---:|---:|
+| CHANGE-seq train | 0.2362 | 0.8834 | 0.0005 |
+| CHANGE-seq val | 0.0469 | 0.7853 | 0.0014 |
+| CHANGE-seq test | 0.0878 | 0.7982 | 0.0009 |
+| GUIDE-seq cross-assay | 0.1250 | 0.8722 | 0.0094 |
+
+**Causal Consistency:**
+
+- `Neural CCS_Overall = 0.8333` (decisamente migliore rispetto ai baseline non causali)
+
+**Confronto con i run deep precedenti (prima del bypass lineare):**
+
+- nei run con maggiore componente deep si osservava pattern di overfitting severo, con train AUPRC molto alto e validation quasi collassata (ordine di grandezza ~`0.89` train vs ~`0.002` val)
+- con il modello semplificato il gap train/val resta presente ma si riduce in modo sostanziale; la validazione torna su valori non degeneri (`~0.047`)
+
+**Interpretazione:**
+
+- la porzione deep ad alta capacità nella catena causale tendeva a catturare correlazioni spurie assay-specifiche
+- il ritorno a una forma più parsimoniosa (bypass lineare con hard priors) riduce la varianza del modello e migliora la robustezza out-of-sample
+- il miglioramento di CCS suggerisce che la semplificazione non solo aiuta la generalizzazione predittiva, ma preserva meglio la coerenza causale desiderata
+
+**Implicazione per la tesi:**
+
+- in questo dominio, una parametrizzazione causale semplice e ben vincolata è preferibile a una componente deep più espressiva ma instabile
+- la complessità architetturale va introdotta solo se produce un guadagno netto e stabile su validation/cross-assay, non solo su train
