@@ -1,13 +1,9 @@
 _base: experiments/configs/base.yaml
 
 experiment:
-  name: exp_03_neural_scm
-  description: >
-    Phase 3 Neural SCM experiment.
-    Trains NeuralSCM on CHANGE-seq splits. Causal interventions are generated 
-    on-the-fly during training. Evaluates within-dataset (CHANGE-seq test), cross-assay
-    (GUIDE-seq), and causal consistency via the native do() operator.
-    Compares CCS against the XGBoost baseline from phase 2.
+  name: Exp04_LinearBypass_HardPrior
+  tags: ["linear_bypass", "focal_loss", "hard_prior", "ablation"]
+  notes: "Bypassate le MLP per contare esplicitamente i mismatch. Test se le MLP causano l'overfitting."
 
 seed: 42
 
@@ -20,7 +16,7 @@ training:
   device: cuda  # Usare 'cpu' solo per debug locale
   learning_rate: 0.0001  # Abbassato per stabilizzare i gradienti con pos_weight alto
   batch_size: 64
-  epochs: 50
+  epochs: 5
   patience: 99 # Disabilita early stopping per garantire un confronto completo
   pos_weight: 162.0  # Imbalance ratio di CHANGE-seq
   loss_type: focal          # Scegli tra "focal" e "bce"
@@ -54,4 +50,4 @@ output:
   ccs_comparison_json: ccs_comparison.json
 
 tracking:
-  enabled: false  
+  enabled: true  

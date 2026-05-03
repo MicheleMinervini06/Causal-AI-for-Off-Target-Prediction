@@ -15,6 +15,8 @@ class BaseEncoder(nn.Module, ABC):
     Interfaccia base per tutti gli encoder di sequenze CRISPR.
     """
 
+    embed_dim: int
+
     @abstractmethod
     def encode(self, sgrnas: list[str], off_targets: list[str]) -> torch.Tensor:
         """
