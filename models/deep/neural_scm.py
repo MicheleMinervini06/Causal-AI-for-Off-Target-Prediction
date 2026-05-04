@@ -59,6 +59,16 @@ class NeuralSCM(nn.Module):
             self.nonseed_node = TypedMismatchModule(region_size=8, hidden_dim=hidden_dim)
             self.seed_node = TypedMismatchModule(region_size=8, hidden_dim=hidden_dim)
             self.proximal_node = TypedMismatchModule(region_size=4, hidden_dim=hidden_dim)
+
+        elif self.architecture == "learned_mlp":
+            # Run 12: End-to-end Representation Learning
+            # 1. Istanziamo l'encoder DENTRO l'SCM perché il gradiente lo addestri
+            self.pairwise_encoder = PairwiseTokenEncoder(embed_dim=4, use_learned_embeddings=True)
+            
+            # 2. Possiamo riciclare il modulo della Run 10 (aspetta region_size * 4)
+            self.nonseed_node = TypedMismatchModule(region_size=8, hidden_dim=hidden_dim)
+            self.seed_node = TypedMismatchModule(region_size=8, hidden_dim=hidden_dim)
+            self.proximal_node = TypedMismatchModule(region_size=4, hidden_dim=hidden_dim)
             
         else:
             raise ValueError(f"Architettura non riconosciuta: {self.architecture}")
@@ -185,6 +195,21 @@ class NeuralSCM(nn.Module):
             mm_seed = s_typed[:, 8:16, :]     # [B, 8, 4]
             mm_prox = s_typed[:, 16:20, :]    # [B, 4, 4]
 
+            s_prox = torch.full((B, 1), intervention["proximal"], device=device, dtype=torch.float32) if "proximal" in intervention else self.proximal_node(mm_prox)
+            s_seed = torch.full((B, 1), intervention["seed"], device=device, dtype=torch.float32) if "seed" in intervention else self.seed_node(mm_seed)
+            s_nonseed = torch.full((B, 1), intervention["non_seed"], device=device, dtype=torch.float32) if "non_seed" in intervention else self.nonseed_node(mm_nonseed)
+        
+        elif self.architecture == "learned_mlp":
+            # Run 12: Estrazione Appresa
+            # L'encoder restituisce direttamente un tensore [B, 20, 4] già sul device corretto
+            s_learned = self.pairwise_encoder.encode(sgrnas, off_targets)
+            
+            # Slicing posizionale (identico alla Run 10)
+            mm_nonseed = s_learned[:, 0:8, :]   # [B, 8, 4]
+            mm_seed = s_learned[:, 8:16, :]     # [B, 8, 4]
+            mm_prox = s_learned[:, 16:20, :]    # [B, 4, 4]
+
+            # Passaggio nei nodi causali
             s_prox = torch.full((B, 1), intervention["proximal"], device=device, dtype=torch.float32) if "proximal" in intervention else self.proximal_node(mm_prox)
             s_seed = torch.full((B, 1), intervention["seed"], device=device, dtype=torch.float32) if "seed" in intervention else self.seed_node(mm_seed)
             s_nonseed = torch.full((B, 1), intervention["non_seed"], device=device, dtype=torch.float32) if "non_seed" in intervention else self.nonseed_node(mm_nonseed)

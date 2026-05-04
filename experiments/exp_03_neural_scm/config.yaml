@@ -1,16 +1,16 @@
 _base: experiments/configs/base.yaml
 
 experiment:
-  name: Exp07_TypedMLP_IRM
-  tags: ["typed_mlp", "irm", "causal_regularization", "run_11"]
-  notes: "Aggiunta IRMv1 per forzare l'invarianza tra le guide. Warmup di 5 epoche, max lambda 1.0."
+  name: Exp08_LearnedMLP_HardPrior
+  tags: ["learned_mlp", "representation_learning", "run_12"]
+  notes: "Ablation study: sostituzione delle categorie chimiche fisse con un PairwiseTokenEncoder (embed_dim=4) appreso end-to-end."
 
 model:
   # scegli tra "linear_bypass", "mini_mlp", o "deep_scm"
-  architecture: "typed_mlp" 
+  architecture: "learned_mlp" 
   
   # Parametri specifici per la nuova architettura (Run 9)
-  typed_mlp:
+  learned_mlp:
     hidden_dim: 8
 
   # Parametri base
@@ -34,7 +34,7 @@ training:
   pct_start: 0.3
 
   # Parametri specifici per IRM
-  irm_enabled: true
+  irm_enabled: false
   lambda_irm_max: 1.0
   irm_warmup_epochs: 5
 
