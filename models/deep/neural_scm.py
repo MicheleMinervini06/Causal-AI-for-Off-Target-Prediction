@@ -222,6 +222,7 @@ class NeuralSCM(nn.Module):
             "proximal_scalar": s_prox,
             "seed_scalar": s_seed,
             "nonseed_scalar": s_nonseed,
+            "logit": logit,
             "activity_probability": activity_prob,
             "repr_pam": repr_pam,
             "repr_proximal": repr_prox,

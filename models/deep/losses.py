@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch.autograd as autograd
 
 class NeuralSCMLoss(nn.Module):
     """
@@ -144,3 +145,48 @@ class FocalNeuralSCMLoss(NeuralSCMLoss):
         focal = alpha_t * ((1.0 - p_t) ** self.gamma) * ce
 
         return focal.mean()
+    
+
+def compute_irm_penalty(logits: torch.Tensor, targets: torch.Tensor, environments: list[str], pos_weight: float) -> torch.Tensor:
+    """
+    Calcola l'IRMv1 penalty raggruppando i campioni del batch per guida.
+    """
+    device = logits.device
+    penalty = torch.tensor(0.0, device=device)
+    
+    # Trova gli ID univoci delle guide in questo batch
+    unique_envs = list(set(environments))
+    
+    # Se c'è solo 1 guida nel batch, l'IRM non ha termini di paragone
+    if len(unique_envs) <= 1:
+        return penalty
+
+    # Il classificatore fittizio (w=1.0) di cui calcoleremo il gradiente
+    scale = torch.tensor(1.0, device=device, requires_grad=True)
+    valid_envs = 0
+
+    for env in unique_envs:
+        # Crea una maschera booleana per i campioni di questa specifica guida
+        mask = torch.tensor([e == env for e in environments], device=device, dtype=torch.bool)
+        
+        if mask.sum() < 2:
+            continue  # Salta ambienti con 1 solo campione (gradiente instabile)
+            
+        env_logits = logits[mask]
+        env_targets = targets[mask]
+        
+        # BCE Loss classica applicata SOLO a questo ambiente, scalata dal classificatore fittizio
+        env_loss = F.binary_cross_entropy_with_logits(
+            env_logits * scale, 
+            env_targets, 
+            pos_weight=torch.tensor([pos_weight], device=device)
+        )
+        
+        # Calcola il gradiente della loss dell'ambiente rispetto a 'scale'
+        grad = autograd.grad(env_loss, [scale], create_graph=True)[0]
+        
+        # IRMv1: Somma la norma al quadrato del gradiente
+        penalty += torch.sum(grad ** 2)
+        valid_envs += 1
+
+    return penalty / valid_envs if valid_envs > 0 else penalty

@@ -12,7 +12,7 @@ from torch.optim.lr_scheduler import OneCycleLR
 from sklearn.metrics import average_precision_score, f1_score, roc_auc_score
 from torch.utils.data import DataLoader
 
-from .losses import NeuralSCMLoss, FocalNeuralSCMLoss
+from .losses import NeuralSCMLoss, FocalNeuralSCMLoss, compute_irm_penalty
 
 logger = logging.getLogger(__name__)
 
@@ -24,10 +24,13 @@ def train_epoch(
     loss_fn: nn.Module,
     device: torch.device,
     scheduler: Any | None = None,
+    current_lambda_irm: float = 0.0,  # Typo corretto
+    pos_weight: float = 1.0           # Default a 1.0 come richiesto
 ) -> dict[str, float]:
     """
     Esegue una singola epoca di addestramento.
     Gestisce i batch come dizionari per massima flessibilità e robustezza.
+    Include la regolarizzazione causale IRM.
     """
     model.train()
     
@@ -35,6 +38,7 @@ def train_epoch(
     total_pred = 0.0
     total_causal = 0.0
     total_consist = 0.0
+    total_irm = 0.0  # Nuovo contatore per tracciare il peso dell'IRM
     steps = 0
     all_train_scores = []
     all_train_labels = []
@@ -42,7 +46,7 @@ def train_epoch(
     for batch in loader:
         optimizer.zero_grad()
         
-        # Unpacking esplicito via dizionario (Opzione B)
+        # Unpacking esplicito via dizionario
         sgrnas = batch["sgrnas"]
         off_targets = batch["off_targets"]
         labels = batch["labels"].to(device)
@@ -84,11 +88,26 @@ def train_epoch(
         )
 
         loss = loss_dict["loss"]
+
+        # --- INTEGRAZIONE IRM (Invariant Risk Minimization) ---
+        irm_val = 0.0
+        if current_lambda_irm > 0.0:
+            # Requisito critico: out_base DEVE contenere la chiave "logit" restituita dal forward del modello
+            irm_pen = compute_irm_penalty(
+                logits=out_base["logit"].squeeze(-1),
+                targets=labels,
+                environments=sgrnas,  # Trattiamo l'sgRNA come variabile ambientale
+                pos_weight=pos_weight
+            )
+            loss = loss + (current_lambda_irm * irm_pen)
+            irm_val = irm_pen.item()
+
         loss.backward()
         
-        # Gradient Clipping per stabilizzare i Transformer
+        # Gradient Clipping per stabilizzare i Transformer/MLP
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
+        
         if scheduler is not None:
             # OneCycleLR.step() should be called after each optimizer.step()
             try:
@@ -97,12 +116,15 @@ def train_epoch(
                 # Non-fatal: se lo scheduler non supporta step(), ignoriamo
                 pass
 
+        # Aggiornamento contatori
         total_loss += loss.item()
         total_pred += loss_dict["loss_pred"].item()
-        total_consist += loss_dict["loss_consist"].item()
-        total_causal += loss_dict["loss_causal"].item()
+        total_consist += loss_dict.get("loss_consist", torch.tensor(0.0)).item()
+        total_causal += loss_dict.get("loss_causal", torch.tensor(0.0)).item()
+        total_irm += irm_val
         steps += 1
 
+    # Calcolo metriche
     y_true = np.array(all_train_labels)
     y_scores = np.array(all_train_scores)
     y_pred_binary = (y_scores >= 0.5).astype(int)
@@ -112,15 +134,17 @@ def train_epoch(
         train_auroc = 0.0
         train_f1 = 0.0
     else:
+        from sklearn.metrics import average_precision_score, roc_auc_score, f1_score
         train_auprc = float(average_precision_score(y_true, y_scores))
         train_auroc = float(roc_auc_score(y_true, y_scores))
-        train_f1 = float(f1_score(y_true, y_pred_binary))
+        train_f1 = float(f1_score(y_true, y_pred_binary, zero_division=0))
 
     return {
         "train_loss": total_loss / steps,
         "train_pred_loss": total_pred / steps,
         "train_consist_loss": total_consist / steps,
         "train_causal_loss": total_causal / steps,
+        "train_irm_loss": total_irm / steps,  # Utile per monitoraggio W&B
         "train_auprc": train_auprc,
         "train_auroc": train_auroc,
         "train_f1": train_f1,
@@ -175,49 +199,54 @@ def train(
     tracker: Any | None = None,
 ) -> nn.Module:
     """
-    Main training loop con Early Stopping, salvataggio dei pesi migliori e logging.
+    Main training loop con Early Stopping, salvataggio dei pesi migliori, IRM e logging.
     """
-    device = torch.device(config.get("device", "cpu"))
+    # Si aspetta il `config` completo che contiene la sezione `training`.
+    train_cfg = config.get("training", {})
+    device = torch.device(train_cfg.get("device", config.get("device", "cpu")))
     model = model.to(device)
+    lr = train_cfg.get("learning_rate", 1e-3)
+    epochs = train_cfg.get("epochs", 50)
+    patience = train_cfg.get("patience", 10)
     
-    lr = config.get("learning_rate", 1e-3)
-    epochs = config.get("epochs", 50)
-    patience = config.get("patience", 10)
+    # Parametri IRM dal Config
+    irm_enabled = train_cfg.get("irm_enabled", False)
+    lambda_irm_max = train_cfg.get("lambda_irm_max", 1.0)
+    irm_warmup = train_cfg.get("irm_warmup_epochs", 5)
+    pos_weight_val = train_cfg.get("pos_weight", 1.0)  # Default a 1.0 se non specificato
     
-    # Selettore della funzione di Loss dal Config
-    loss_type = config.get("loss_type", "bce") # Default a focal per questa fase
+    loss_type = train_cfg.get("loss_type", "bce") 
 
     if loss_type == "bce":
         logger.info("Inizializzazione NeuralSCMLoss classica (BCE + pos_weight)")
         loss_fn = NeuralSCMLoss(
-            pos_weight=config.get("pos_weight", 1.0),
-            lambda_causal=config.get("lambda_causal", 0.5),
-            lambda_consist=config.get("lambda_consist", 0.5)
+            pos_weight=pos_weight_val,
+            lambda_causal=train_cfg.get("lambda_causal", 0.5),
+            lambda_consist=train_cfg.get("lambda_consist", 0.5)
         ).to(device)
     elif loss_type == "focal":
         logger.info("Inizializzazione FocalNeuralSCMLoss")
         loss_fn = FocalNeuralSCMLoss(
-            alpha=config.get("focal_alpha", 0.25),
-            gamma=config.get("focal_gamma", 2.0),
-            lambda_causal=config.get("lambda_causal", 0.01),
-            lambda_consist=config.get("lambda_consist", 0.01)
+            alpha=train_cfg.get("focal_alpha", 0.25),
+            gamma=train_cfg.get("focal_gamma", 2.0),
+            lambda_causal=train_cfg.get("lambda_causal", 0.01),
+            lambda_consist=train_cfg.get("lambda_consist", 0.01)
         ).to(device)
     else:
         raise ValueError(f"Tipo di loss sconosciuto: {loss_type}")    
     
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
 
-    # Scheduler OneCycleLR: warmup + annealing per-iterazione
     try:
         scheduler = OneCycleLR(
             optimizer,
             max_lr=lr,
             steps_per_epoch=len(train_loader),
             epochs=epochs,
-            pct_start=config.get("pct_start", 0.1),
+            pct_start=train_cfg.get("scheduler_pct_start", 0.3),
             cycle_momentum=False,
         )
-        logger.info("OneCycleLR scheduler attivato: max_lr=%.6f pct_start=%.2f", lr, config.get("pct_start", 0.1))
+        logger.info("OneCycleLR scheduler attivato: max_lr=%.6f pct_start=%.2f", lr, train_cfg.get("scheduler_pct_start", 0.3))
     except Exception as e:
         scheduler = None
         logger.warning("Impossibile istanziare OneCycleLR: %s. Continuo senza scheduler.", e)
@@ -226,12 +255,24 @@ def train(
     best_model_state = None
     epochs_without_improvement = 0
 
-    logger.info(f"Inizio addestramento. Device: {device}, Epoche: {epochs}")
+    logger.info(f"Inizio addestramento. Device: {device}, Epoche: {epochs}, IRM Enabled: {irm_enabled}")
 
     if tracker is not None:
         logger.info("Tracker inizializzato - metriche verranno loggiate.")
 
     for epoch in range(epochs):
+        
+        # --- 1. WARMUP DINAMICO IRM ---
+        if irm_enabled:
+            if epoch < irm_warmup:
+                current_lambda_irm = 0.0
+            else:
+                progress = (epoch - irm_warmup) / max(1, (epochs - irm_warmup))
+                current_lambda_irm = lambda_irm_max * progress
+        else:
+            current_lambda_irm = 0.0
+
+        # --- 2. TRAIN EPOCH ---
         train_metrics = train_epoch(
             model=model,
             loader=train_loader,
@@ -239,63 +280,52 @@ def train(
             loss_fn=loss_fn,
             device=device,
             scheduler=scheduler,
+            current_lambda_irm=current_lambda_irm, # Passiamo il lambda IRM
+            pos_weight=pos_weight_val
         )
         
         val_metrics = evaluate(model, val_loader, device)
-        
         current_auprc = val_metrics["auprc"]
         
+        # Calcolo della norma L2 totale della rete
+        l2_norm = sum(p.norm(2).item() ** 2 for p in model.parameters()) ** 0.5
+        current_lr = optimizer.param_groups[0]["lr"]
+
         logger.info(
-            f"Epoch {epoch+1:03d} | "
+            f"Epoch {epoch+1:03d} | IRM Lambda: {current_lambda_irm:.2f} | "
             f"Loss: {train_metrics['train_loss']:.4f} "
             f"(P:{train_metrics['train_pred_loss']:.4f} C:{train_metrics['train_causal_loss']:.4f}) | "
             f"Train AUPRC: {train_metrics['train_auprc']:.4f} | "
             f"Train AUROC: {train_metrics['train_auroc']:.4f} | "
-            f"Train F1: {train_metrics['train_f1']:.4f} | "
-            f"Val AUPRC: {current_auprc:.4f} | Val AUROC: {val_metrics['auroc']:.4f}"
+            f"Val AUPRC: {current_auprc:.4f} | Val AUROC: {val_metrics['auroc']:.4f} | "
+            f"LR: {current_lr:.6f} | L2: {l2_norm:.4f}"
         )
 
-        # Logging su tracker (se presente)
         if tracker is not None:
-            tracker.log_metrics({
+            tracker_metrics = {
                 "epoch": epoch + 1,
                 "train/loss_total": train_metrics.get("train_loss", 0.0),
                 "train/loss_pred": train_metrics.get("train_pred_loss", 0.0),
                 "train/loss_causal": train_metrics.get("train_causal_loss", 0.0),
-                "train/loss_consist": train_metrics.get("train_consist_loss", 0.0),
                 "train/auprc": train_metrics.get("train_auprc", 0.0),
                 "train/auroc": train_metrics.get("train_auroc", 0.0),
                 "train/f1_score": train_metrics.get("train_f1", 0.0),
                 "val/auprc": val_metrics.get("auprc", 0.0),
                 "val/auroc": val_metrics.get("auroc", 0.0),
                 "val/f1_score": val_metrics.get("f1", 0.0),
-                "system/learning_rate": optimizer.param_groups[0]["lr"]
-            })
+                "train/learning_rate": current_lr,
+                "train/l2_norm": l2_norm
+            }
+            if irm_enabled:
+                tracker_metrics["train/lambda_irm"] = current_lambda_irm
+                
+            tracker.log_metrics(tracker_metrics, step=epoch + 1)
 
-        # # Calcolo dei pesi effettivi per il logging (applichiamo softplus per garantire negatività se usato)
-        # w_prox_eff = -F.softplus(getattr(model, "w_proximal")).detach().cpu().item()
-        # w_seed_eff = -F.softplus(getattr(model, "w_seed")).detach().cpu().item()
-        # w_nonseed_eff = -F.softplus(getattr(model, "w_nonseed")).detach().cpu().item()
-        # # Applichiamo lo stesso clamp usato nel modello per coerenza visiva
-        # try:
-        #     bias_eff = float(torch.clamp(getattr(model, "bias"), min=-4.0, max=3.0).detach().cpu().item())
-        # except Exception:
-        #     # Fallback: se qualcosa va storto leggiamo il valore grezzo
-        #     bias_eff = float(getattr(model, "bias").detach().cpu().item())
-
-        # logger.info(
-        #     f"  Combiner (Effettivi): w_prox={w_prox_eff:.4f} "
-        #     f"w_seed={w_seed_eff:.4f} w_nonseed={w_nonseed_eff:.4f} bias={bias_eff:.4f}"
-        # )
-
-        # Calcolo dei pesi effettivi per il logging (allineato all'Hard Prior di neural_scm.py)
+        # Calcolo dei pesi effettivi
         w_prox_eff = -F.softplus(getattr(model, "w_proximal")).detach().cpu().item()
-        
-        # Leggiamo i parametri base per calcolare la gerarchia
         w_nonseed_base = F.softplus(getattr(model, "w_nonseed")).detach().cpu().item()
         w_seed_extra = F.softplus(getattr(model, "w_seed")).detach().cpu().item()
         
-        # Applichiamo la stessa matematica del forward
         w_nonseed_eff = -w_nonseed_base
         w_seed_eff = -(w_nonseed_base + w_seed_extra)
         
