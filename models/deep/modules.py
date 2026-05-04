@@ -106,3 +106,39 @@ class ProximalModule(SpacerRegionModule):
     def __init__(self, embed_dim: int = 16):
         # Usiamo MLP perché il Transformer su soli 4 token è inefficiente
         super().__init__(start_idx=16, end_idx=20, embed_dim=embed_dim, use_transformer=False)
+
+
+class MismatchVectorModule(nn.Module):
+    """
+    Riceve il vettore binario di mismatch di una specifica regione.
+    Applica una trasformazione non lineare per catturare l'epistasi posizionale.
+    """
+    def __init__(self, region_size: int, hidden_dim: int = 4):
+        super().__init__()
+        self.fc = nn.Sequential(
+            nn.Linear(region_size, hidden_dim),
+            nn.LeakyReLU(0.1),  # Evita la morte dei neuroni nascosti
+            nn.Linear(hidden_dim, 1),
+            nn.Softplus(),      # Forza output > 0 dolcemente: il gradiente non muore MAI
+        )
+
+    def forward(self, mm_vector_region: torch.Tensor) -> torch.Tensor:
+        return self.fc(mm_vector_region)
+
+class TypedMismatchModule(nn.Module):
+    """
+    Riceve il tensore one-hot dei tipi di mismatch (Match, Wobble, Transition, Transversion).
+    Input shape: (Batch, region_size, 4)
+    """
+    def __init__(self, region_size: int, hidden_dim: int = 8):
+        super().__init__()
+        self.fc = nn.Sequential(
+            nn.Flatten(), # Trasforma [B, region_size, 4] in [B, region_size * 4]
+            nn.Linear(region_size * 4, hidden_dim),
+            nn.LeakyReLU(0.1),
+            nn.Linear(hidden_dim, 1),
+            nn.Softplus(),  # Vincolo biologico morbido (>=0)
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.fc(x)
