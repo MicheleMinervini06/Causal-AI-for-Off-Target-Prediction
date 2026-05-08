@@ -266,3 +266,121 @@ Conclusione: la variante non migliora la qualità causale o predittiva degli esp
 
 - in questo dominio, una parametrizzazione causale semplice e ben vincolata è preferibile a una componente deep più espressiva ma instabile
 - la complessità architetturale va introdotta solo se produce un guadagno netto e stabile su validation/cross-assay, non solo su train
+
+---
+
+## Fase 4 — Analisi controfattuale batch su Neural SCM (Exp15_Positional)
+
+Estensione di `simulate_intervention.py` da single-pair a batch su `CHANGEseq_positive.csv` (67k coppie, 104 guide) e `GUIDEseq_positive.csv` (1616 coppie, 46 guide). Pipeline Pearl classica: abduzione `U = y_obs_logit - y_pred_logit`, intervento `do(...)`, predizione controfattuale `y_cf = sigmoid(y_do_logit + U)`. Interventi fissi: truncation 5' (`NN + guide[2:]`) e mutation pos15→A (`guide[14] = 'A'`).
+
+### F8 — La saturazione di `y_obs_on` rendeva l'abduzione on-target degenere
+
+**Problema identificato:** `reads_to_prob(on_reads, on_reads, "log") ≡ 99%` per costruzione (numeratore = denominatore, capped a 99). Quindi `U_on = logit(0.99) - y_pred_on_logit` ha correlazione **−0.994** con `y_pred_on_prob`: completamente determinato dal modello, non un'inferenza dai dati. Non è abduzione, è uno shift di calibrazione.
+
+**Conseguenza pre-fix:** su single-pair, `99% → 96.9%` post-intervento sembrava un trade-off accettabile. In realtà U_on (~+2.6 logit) agiva da ammortizzatore costante che mascherava qualunque crollo di `logit_on_intervened`.
+
+**Fix implementato:** due regimi distinti, selezionabili via `--on-target-mode`:
+
+- `per_run` (default GUIDEseq): denominatore di `reads_to_prob` = max reads del `run` sperimentale. `y_obs_on_prob` varia per guida, U_on diventa una vera abduzione (mean=−0.55, std=1.38).
+- `drop` (default CHANGEseq, manca colonna `run`): nessuna abduzione on-target. Baseline = `y_pred_on_prob`. `delta_on` = credenza del modello sull'effetto dell'intervento. Asimmetrico rispetto a `delta_off` ma epistemicamente onesto.
+
+**Implicazione:** la saturazione era un bug interpretativo, non di magnitudine. I risultati pre-fix sottostimavano sistematicamente il costo on-target degli interventi (truncation 5' passa da `Δon = -1.3%` pre-fix a `Δon = -15.5%` post-fix su GUIDEseq). Tutte le conclusioni single-pair dello script originale vanno riviste sotto il nuovo regime.
+
+---
+
+### F9 — `U_off` cross-assay: scaling cell-free vs in vivo, non errore di modello
+
+**Osservazione:** post-fix, `U_off` ha distribuzioni molto diverse tra training set (CHANGEseq, in vitro) e test set (GUIDEseq, in vivo).
+
+| Dataset | U_off mean | U_off std | forma |
+|---|---:|---:|---|
+| CHANGEseq (train) | **+2.34** | 1.36 | bimodale (~+1, ~+4) |
+| GUIDEseq (test) | **−0.14** | 1.22 | unimodale, ~normale |
+
+**Diagnostica chiave** — rapporto raw `off_reads / on_reads`:
+
+| | mediana | q95 | max |
+|---|---:|---:|---:|
+| CHANGEseq | **0.667** | 2.23 | **30.8** |
+| GUIDEseq | **0.009** | 0.52 | 4.98 |
+
+In vitro l'off-target medio ha 2/3 dell'attività on-target e alcuni la superano di 30×; in vivo lo 0.9%. Differenza di due ordini di grandezza nella scala operativa.
+
+**Predizioni del modello — invariate** tra dataset (CHANGEseq median 67%, GUIDEseq median 54%): il modello ha imparato la termodinamica guida–DNA che è invariante al regime sperimentale. È `y_obs_off_prob` a cambiare scala (CHANGEseq median 93% vs GUIDEseq 42%) perché `reads_to_prob` riflette l'output sperimentale grezzo.
+
+**Verifica empirica** — stratificazione di `U_off` per `distance` (numero di mismatch):
+
+| distance | U_off CHANGEseq | U_off GUIDEseq |
+|---:|---:|---:|
+| 1 | +1.94 | +0.91 |
+| 4 | +2.10 | −0.29 |
+| 6 | **+2.67** | +0.03 |
+
+Su CHANGEseq il gap cresce monotonicamente con i mismatch: il modello sa che 6 mismatch dovrebbero ridurre l'attività, ma in vitro questi siti restano saturi vicino all'on-target. Su GUIDEseq il pattern è piatto, coerente con la termodinamica.
+
+**Bimodalità su CHANGEseq:**
+
+- mode ~+1: off-target con attività intermedia (rapporto reads 0.3–0.7)
+- mode ~+4: off-target con `off_reads ≥ on_reads` (rapporto > 1, fino a 30) — saturazione tecnica del cell-free
+
+**Interpretazione:** `U_off` su CHANGEseq non misura errore casuale del modello, misura la **distanza tra termodinamica pura e biofisica del cell-free**. Il modello non sbaglia: è la metrica `y_obs` ad avere una scala diversa nei due regimi.
+
+**Implicazione metodologica:** `delta = y_cf - y_obs` è invariante a uno shift sistematico di U (si compensa nel cambio), quindi i controfattuali restano validi su entrambi i dataset. Cambia l'interpretazione semantica:
+
+- GUIDEseq: `delta_off` = cambiamento atteso nell'attività in vivo osservata
+- CHANGEseq: `delta_off` = cambiamento in scala "termodinamica" proiettato via U sulla scala in-vitro
+
+GUIDEseq resta il regime epistemicamente affidabile per claim clinici. CHANGEseq è utile come test della termodinamica del modello e come diagnostica del gap in-vitro/in-vivo. Coerente con F1: il modello generalizza il **meccanismo**, non il **protocollo**.
+
+---
+
+### F10 — Interventi fissi non superano il test del Pareto su nessun dataset
+
+**Metrica:** quadrante ideale = `(Δoff < 0) ∧ (Δon ≥ −5%)`. Aggregazione per-guida (mediana entro guida → distribuzione su N guide).
+
+**Risultato:**
+
+| Dataset | N guide | Truncation 5' ideale | Mutation pos15→A ideale |
+|---|---:|---:|---:|
+| GUIDEseq (per_run) | 46 | 3 (6.5%) | 5 (10.9%) |
+| CHANGEseq (drop) | 104 | **0 (0.0%)** | **0 (0.0%)** |
+
+**Magnitudine media post-fix (GUIDEseq, per coppia):**
+
+- Truncation 5': `Δoff = −12.9%`, `Δon = −15.5%` → distrugge entrambi quasi simmetricamente
+- Mutation pos15→A: `Δoff = −7.95%`, `Δon = −7.17%` → trade-off neutro in media
+
+**Patologia della Mutation pos15→A:** `q25(Δoff_mut) = 0.00` esatto perché ~25% delle guide hanno già `A` in posizione 14 (no-op). Inoltre **43.4% delle coppie ha `Δoff ≥ 0`**: la mutazione spesso porta la guida più vicina all'off-target invece che più lontana, perché la pos 15 non è scelta in modo guida-specifico.
+
+**Interpretazione:** il single-pair output positivo (`99% → 22.9%` off-target) era artefatto della saturazione di U_on (F8). Una volta calibrata l'abduzione, gli interventi fissi non offrono trade-off accettabile su scala batch.
+
+**Implicazione:** la prossima iterazione richiede rescue mutation **guida-specifica**: per ogni coppia, scegliere posizioni `i ∈ seed-extension` dove `on_target[i] ≠ off_target[i]` e mutare `guide[i] = on_target[i]`. Solo così l'intervento separa on-target e off-target invece di degradare entrambi simmetricamente.
+
+---
+
+### F11 — Aggregazione per-guida vs per-coppia: differenze sostanziali nelle conclusioni
+
+**Problema:** GUIDEseq ha guide con 543 righe e altre con 1 riga; CHANGEseq stesso pattern. Le statistiche su tutta la popolazione di coppie sono dominate dalle poche guide con molti off-target rilevati.
+
+**Esempio quantitativo (GUIDEseq, Mutation pos15→A):**
+
+- mean `Δoff` su tutte le coppie (N=1616): `−7.95%`
+- mean delle mediane per-guida (N=46): `−13.5%`
+
+Differenza ~6 punti percentuali: una guida con 543 righe pesa 543× nella media globale. Entrambi i numeri sono "veri", ma rispondono a domande diverse.
+
+**Decisione metodologica:**
+
+- per claim del tipo "efficacia attesa di un intervento su una guida nuova": **mediana entro guida → distribuzione di quei valori** (per-guida)
+- per claim del tipo "copertura sui dati osservati nel dataset": media globale (per-coppia)
+
+**Implementazione:** lo script salva entrambi gli output (`<dataset>_batch_results.csv` per-coppia + `<dataset>_per_guide_medians.csv` per-guida). I quadranti ideali nel sommario riportano entrambe le aggregazioni così le conclusioni sono leggibili senza ambiguità.
+
+---
+
+## Todo Fase 4
+
+- [ ] Implementare rescue mutation guida-specifica (sostituisce `mutate_pos15` fissa). Per ogni coppia: posizioni `i ∈ [8, 15]` dove `on_target[i] ≠ off_target[i]`, mutare `guide[i] = on_target[i]`. Filtrare coppie senza posizioni qualificanti.
+- [ ] Stratificare `U_off` su CHANGEseq per GC%, regione genomica accessibile, distanza al PAM canonico per testare l'ipotesi "U_off = saturazione cell-free" (F9).
+- [ ] Aggiungere bootstrap CI sulle medie per-guida dei `Δ` per quantificare la significatività statistica delle conclusioni F10.
+- [ ] Confrontare interventi fissi vs rescue guida-specifica sulla stessa popolazione per validare il ragionamento controfattuale del modello.
