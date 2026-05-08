@@ -1,36 +1,37 @@
 _base: experiments/configs/base.yaml
 
 experiment:
-  name: Exp09_ContextAwareMLP_Hidden8
-  tags: ["context_aware", "typed_mlp", "run_13"]
-  notes: "Test intermedio: encoder a 8 dimensioni (4D Mismatch + 4D sgRNA context) e hidden_dim = 8 per verificare se consente di ridurre overfitting."
+  name: Exp15_Positional_ExtendedOneCycle
+  tags: ["hybrid_causal", "positional_mlp", "run_15", "extended_training"]
+  notes: "Ritorno allo scheduler OneCycleLR per evitare lo shock dei gradienti. Epoche raddoppiate (30) e pct_start dimezzato (0.15) per mantenere il warmup identico alla Run 13 ma estendere drasticamente la fase di fine-tuning a basso LR."
 model:
   # scegli tra "linear_bypass", "mini_mlp", o "deep_scm"
-  architecture: "context_aware_mlp"
-  
-  # Parametri specifici per la nuova architettura (Run 13)
-  context_aware_mlp:
-    hidden_dim: 8
+  architecture: "positional_mlp"
 
   # Parametri base
   embed_dim: 16
-  hidden_dim: 32
-  encoder: context_aware  # Scegli tra "pairwise" o "biological_mismatch" o "context_aware"
+  hidden_dim: 8
+  encoder: biological_mismatch  # Scegli tra "pairwise" o "biological_mismatch" o "context_aware"
+
+  context_cols:
+    - gc_sgRNA
+    - gc_offtarget
+    - concept_gc_delta
 
 training:
   device: cuda  # Usare 'cpu' solo per debug locale
   learning_rate: 0.0001  # Abbassato per stabilizzare i gradienti con pos_weight alto
   batch_size: 64
-  epochs: 15
+  epochs: 30
   patience: 99 # Disabilita early stopping per garantire un confronto completo
-  pos_weight_dynamic: true  # Se true calcola pos_weight dinamicamente dal train split
-  pos_weight: 46.3  # Valore statico di fallback se pos_weight_dynamic == false
+  pos_weight_dynamic: false  # Se true calcola pos_weight dinamicamente dal train split
+  pos_weight: 5.0  # Valore statico di fallback se pos_weight_dynamic == false
   loss_type: focal          # Scegli tra "focal" e "bce"
   focal_alpha: 0.25         # Peso standard per la classe positiva
-  focal_gamma: 2.0          # Forza di soppressione per i negativi facili
+  focal_gamma: 3.0          # Forza di soppressione per i negativi facili
   lambda_causal: 0.01       # Ridotto per allinearsi alla magnitudo della Focal
   lambda_consist: 0.01      # Ridotto per allinearsi alla magnitudo della Focal
-  pct_start: 0.3
+  pct_start: 0.15
 
   # Parametri specifici per IRM
   irm_enabled: false
