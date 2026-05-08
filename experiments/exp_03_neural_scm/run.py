@@ -28,10 +28,15 @@ log = logging.getLogger(__name__)
 
 
 class _CRISPRDataset(Dataset):
-    def __init__(self, df: pd.DataFrame) -> None:
+    def __init__(self, df: pd.DataFrame, context_cols: list[str] | None = None) -> None:
         self._sgrnas = df["sgRNA_seq"].astype(str).tolist()
         self._off_targets = df["off_seq"].astype(str).tolist()
         self._labels = df["label"].astype(float).tolist()
+
+        # Salvataggio delle variabili esogene
+        self._context_data = None
+        if context_cols is not None:
+            self._context_data = df[context_cols].fillna(0.0).values.astype(np.float32)
 
     def __len__(self) -> int:
         return len(self._sgrnas)
@@ -41,6 +46,7 @@ class _CRISPRDataset(Dataset):
             "sgrna": self._sgrnas[idx],
             "off_target": self._off_targets[idx],
             "label": self._labels[idx],
+            "context_features": self._context_data[idx] if self._context_data is not None else None,
         }
 
 
@@ -58,6 +64,12 @@ def _collate(batch: list[dict]) -> dict:
         "off_targets": off_targets,
         "labels": labels,
     }
+
+    if "context_features" in batch[0]:
+        out["context_features"] = torch.tensor(
+            np.stack([b["context_features"] for b in batch]), 
+            dtype=torch.float32
+        )
 
     # Causal Representation Learning: Generazione varianti On-The-Fly
     # Inseriamo un rateo del 50% per avere batch misti (efficienza computazionale)
@@ -156,9 +168,9 @@ def _save_json(payload: dict[str, Any], path: Path) -> None:
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
-def _make_loader(df: pd.DataFrame, batch_size: int, shuffle: bool) -> DataLoader:
+def _make_loader(df: pd.DataFrame, batch_size: int, shuffle: bool, context_cols: list[str] | None = None) -> DataLoader:
     return DataLoader(
-        _CRISPRDataset(df),
+        _CRISPRDataset(df, context_cols=context_cols),
         batch_size=batch_size,
         shuffle=shuffle,
         collate_fn=_collate,
@@ -249,6 +261,12 @@ def main(config_path: Path) -> None:
     else:
         node_hidden_dim = int(model_cfg.get("hidden_dim", 32))
 
+    # Copnfigurazione delle variabili esogene (U) per il training del Neural SCM
+    context_cols = model_cfg.get("context_cols", [])
+    context_dim = len(context_cols)
+    if context_dim > 0:
+        log.info(f"Hybrid SCM Attivato: Trovate {context_dim} feature esogene: {context_cols}")
+
     log.info("Using NeuralSCM architecture=%s hidden_dim=%d", architecture, node_hidden_dim)
 
     model = NeuralSCM(
@@ -256,13 +274,14 @@ def main(config_path: Path) -> None:
         embed_dim=int(model_cfg.get("embed_dim", 16)),
         hidden_dim=node_hidden_dim,
         encoder=encoder,
+        context_dim=context_dim
     ).to(device)
 
     # 3. Train and save best model
     batch_size = int(training_cfg.get("batch_size", 64))
     
-    train_loader = _make_loader(df_train, batch_size, shuffle=True)
-    val_loader = _make_loader(df_val, batch_size, shuffle=False)
+    train_loader = _make_loader(df_train, batch_size, shuffle=True, context_cols=context_cols)
+    val_loader = _make_loader(df_val, batch_size, shuffle=False, context_cols=context_cols)
     
     # Optional: Initialize experiment tracker (e.g., Weights & Biases) se configurato
     use_tracking = cfg.get("tracking", {}).get("enabled", False)
@@ -276,7 +295,7 @@ def main(config_path: Path) -> None:
     log.info("Model saved: %s", model_path)
 
     # Metriche su train/val/test, usando loader deterministici senza shuffle.
-    train_eval_loader = _make_loader(df_train, batch_size, shuffle=False)
+    train_eval_loader = _make_loader(df_train, batch_size, shuffle=False, context_cols=context_cols)
     train_metrics = evaluate(trained_model, train_eval_loader, device)
     log.info("CHANGE-seq train: %s", train_metrics)
     _save_json(
@@ -284,7 +303,7 @@ def main(config_path: Path) -> None:
         results_dir / str(cfg.get("output", {}).get("metrics_changeseq_train_json", "metrics_changeseq_train.json")),
     )
 
-    val_loader = _make_loader(df_val, batch_size, shuffle=False)
+    val_loader = _make_loader(df_val, batch_size, shuffle=False, context_cols=context_cols)
     val_metrics = evaluate(trained_model, val_loader, device)
     log.info("CHANGE-seq val: %s", val_metrics)
     _save_json(
@@ -293,7 +312,7 @@ def main(config_path: Path) -> None:
     )
 
     # 4. Evaluate within-dataset (CHANGE-seq test)
-    test_loader = _make_loader(df_test, batch_size, shuffle=False)
+    test_loader = _make_loader(df_test, batch_size, shuffle=False, context_cols=context_cols)
     test_metrics = evaluate(trained_model, test_loader, device)
     log.info("CHANGE-seq test: %s", test_metrics)
     _save_json(
@@ -308,7 +327,7 @@ def main(config_path: Path) -> None:
     out_guideseq = results_dir / str(cfg.get("output", {}).get("metrics_guideseq_json", "metrics_guideseq.json"))
     if guideseq_path.exists():
         df_guide = pd.read_parquet(guideseq_path)
-        guide_loader = _make_loader(df_guide, batch_size, shuffle=False)
+        guide_loader = _make_loader(df_guide, batch_size, shuffle=False, context_cols=context_cols)
         guide_metrics = evaluate(trained_model, guide_loader, device)
         log.info("GUIDE-seq cross-assay: %s", guide_metrics)
         _save_json(

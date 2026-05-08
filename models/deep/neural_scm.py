@@ -21,10 +21,12 @@ class NeuralSCM(nn.Module):
         architecture: str = "mini_mlp", 
         embed_dim: int = 16, 
         hidden_dim: int = 4,  # SOLO UNO! Sarà 4 o 32 a seconda di cosa gli passiamo
-        encoder: BaseEncoder | None = None
+        encoder: BaseEncoder | None = None,
+        context_dim: int = 0
     ):
         super().__init__()
         self.architecture = architecture
+        self.context_dim = context_dim
 
         # 1. Inizializzazione Encoder
         if encoder is None:
@@ -75,6 +77,15 @@ class NeuralSCM(nn.Module):
             self.seed_node = TypedMismatchModule(region_size=8, hidden_dim=hidden_dim, input_dim_per_pos=8)
             self.proximal_node = TypedMismatchModule(region_size=4, hidden_dim=hidden_dim, input_dim_per_pos=8)
         
+        elif self.architecture == "positional_mlp":
+            # Un singolo modulo "filtro" che processa ogni nucleotide in modo indipendente
+            # L'input è 4 (Match, Wobble, Transition, Transversion)
+            self.pos_node = nn.Sequential(
+                nn.Linear(4, hidden_dim),
+                nn.ReLU(),
+                nn.Linear(hidden_dim, 1)
+            )
+        
         else:
             raise ValueError(f"Architettura non riconosciuta: {self.architecture}")
 
@@ -83,11 +94,25 @@ class NeuralSCM(nn.Module):
         self.w_seed = nn.Parameter(torch.randn(1))
         self.w_nonseed = nn.Parameter(torch.randn(1))
         self.bias = nn.Parameter(torch.zeros(1))
+        if self.architecture == "positional_mlp":
+            self.w_pos = nn.Parameter(torch.randn(20))
+
+        # Nodo Esogeno (Contesto U)
+        if self.context_dim > 0:
+            # Una rete che mappa il GC Content in un "offset ambientale" (Logit)
+            self.context_net = nn.Sequential(
+                nn.Linear(self.context_dim, hidden_dim * 2),
+                nn.ReLU(),
+                nn.Linear(hidden_dim * 2, hidden_dim),
+                nn.ReLU(),
+                nn.Linear(hidden_dim, 1) 
+            )
 
     def _base_forward(
         self, 
         sgrnas: list[str], 
         off_targets: list[str], 
+        context_features: torch.Tensor | None = None,
         intervention: dict[str, float] | None = None
     ) -> dict[str, torch.Tensor]:
         
@@ -233,6 +258,34 @@ class NeuralSCM(nn.Module):
             s_prox = torch.full((B, 1), intervention["proximal"], device=device, dtype=torch.float32) if "proximal" in intervention else self.proximal_node(mm_prox)
             s_seed = torch.full((B, 1), intervention["seed"], device=device, dtype=torch.float32) if "seed" in intervention else self.seed_node(mm_seed)
             s_nonseed = torch.full((B, 1), intervention["non_seed"], device=device, dtype=torch.float32) if "non_seed" in intervention else self.nonseed_node(mm_nonseed)
+        
+        elif self.architecture == "positional_mlp":
+            typed_batch = []
+            
+            def get_mismatch_type(sg_char, ot_char):
+                if sg_char == ot_char: return [1.0, 0.0, 0.0, 0.0]
+                pair = {sg_char, ot_char}
+                if pair == {'G', 'T'}: return [0.0, 1.0, 0.0, 0.0]
+                if pair in [{'A', 'G'}, {'C', 'T'}]: return [0.0, 0.0, 1.0, 0.0]
+                return [0.0, 0.0, 0.0, 1.0]
+
+            for sg, ot in zip(sgrnas, off_targets):
+                seq_encoding = [get_mismatch_type(sg[i], ot[i]) for i in range(20)]
+                typed_batch.append(seq_encoding)
+                
+            # Tensore [Batch, 20, 4]
+            s_typed = torch.tensor(typed_batch, dtype=torch.float32, device=device)
+            
+            # Passiamo tutte le posizioni attraverso la MLP condivisa
+            # Output: [Batch, 20, 1] -> squeeze -> [Batch, 20]
+            pos_penalties = self.pos_node(s_typed).squeeze(-1)
+            pos_penalties = F.relu(pos_penalties) # Normalizza output negativi
+            
+            # Salviamo nei vecchi scalari la somma delle zone solo per retrocompatibilità coi log
+            s_nonseed = pos_penalties[:, 0:8].sum(dim=1, keepdim=True)
+            s_seed = pos_penalties[:, 8:16].sum(dim=1, keepdim=True)
+            s_prox = pos_penalties[:, 16:20].sum(dim=1, keepdim=True)
+        
         else:
             raise ValueError(f"Architettura non riconosciuta: {self.architecture}")
 
@@ -257,16 +310,33 @@ class NeuralSCM(nn.Module):
 
         bias_eff = torch.clamp(self.bias, min=-4.0, max=3.0)
 
-        logit = (s_prox * w_prox_eff) + (s_seed * w_seed_eff) + (s_nonseed * w_nonseed_eff) + bias_eff
+        if self.architecture == "positional_mlp":
+        # HARD PRIOR POSIZIONALE: Tutti i 20 pesi devono essere <= 0
+            w_pos_eff = -F.softplus(self.w_pos) # [20]
+            # Moltiplica ogni penalità per il suo peso e somma (Prodotto scalare)
+            thermo_logit = torch.sum(pos_penalties * w_pos_eff, dim=1, keepdim=True) + bias_eff
+        else:
+            # Logit Termodinamico Puro (V)
+            thermo_logit = (s_prox * w_prox_eff) + (s_seed * w_seed_eff) + (s_nonseed * w_nonseed_eff) + bias_eff
+
+        # --- IBRIDAZIONE CAUSALE (Iniezione di U) ---  <--- NUOVO BLOCCO
+        final_logit = thermo_logit
+        context_logit = torch.zeros_like(thermo_logit)
         
-        activity_prob = pam_gate * torch.sigmoid(logit)
+        if self.context_dim > 0 and context_features is not None:
+            context_logit = self.context_net(context_features)
+            final_logit = thermo_logit + context_logit # Somma additiva: Fisica + Ambiente
+        
+        activity_prob = pam_gate * torch.sigmoid(final_logit)
 
         return {
             "pam_gate": pam_gate,
             "proximal_scalar": s_prox,
             "seed_scalar": s_seed,
             "nonseed_scalar": s_nonseed,
-            "logit": logit,
+            "thermo_logit": thermo_logit,
+            "context_logit": context_logit,
+            "logit": final_logit,
             "activity_probability": activity_prob,
             "repr_pam": repr_pam,
             "repr_proximal": repr_prox,
@@ -274,25 +344,18 @@ class NeuralSCM(nn.Module):
             "repr_nonseed": repr_nonseed
         }
 
-    def forward(self, sgrnas: list[str] | str, off_targets: list[str] | str) -> dict[str, torch.Tensor]:
-        """Esecuzione standard osservazionale."""
-        if isinstance(sgrnas, str): 
-            sgrnas = [sgrnas]
-        if isinstance(off_targets, str): 
-            off_targets = [off_targets]
-        return self._base_forward(sgrnas, off_targets)
+    def forward(self, sgrnas: list[str] | str, off_targets: list[str] | str, context_features: torch.Tensor | None = None) -> dict[str, torch.Tensor]:
+        if isinstance(sgrnas, str): sgrnas = [sgrnas]
+        if isinstance(off_targets, str): off_targets = [off_targets]
+        return self._base_forward(sgrnas, off_targets, context_features=context_features)
 
-    def do(self, sgrnas: list[str] | str, off_targets: list[str] | str, intervention: dict[str, float]) -> dict[str, torch.Tensor]:
-        """Esecuzione sotto intervento causale (G-computation forward)."""
-        if isinstance(sgrnas, str): 
-            sgrnas = [sgrnas]
-        if isinstance(off_targets, str): 
-            off_targets = [off_targets]
-        return self._base_forward(sgrnas, off_targets, intervention=intervention)
+    def do(self, sgrnas: list[str] | str, off_targets: list[str] | str, intervention: dict[str, float], context_features: torch.Tensor | None = None) -> dict[str, torch.Tensor]:
+        if isinstance(sgrnas, str): sgrnas = [sgrnas]
+        if isinstance(off_targets, str): off_targets = [off_targets]
+        return self._base_forward(sgrnas, off_targets, context_features=context_features, intervention=intervention)
 
-    def predict_proba_batch(self, sgrnas: list[str], off_targets: list[str]) -> torch.Tensor:
-        """Restituisce Tensor[B] di probabilità — per training e valutazione."""
-        out = self._base_forward(sgrnas, off_targets)
+    def predict_proba_batch(self, sgrnas: list[str], off_targets: list[str], context_features: torch.Tensor | None = None) -> torch.Tensor:
+        out = self._base_forward(sgrnas, off_targets, context_features=context_features)
         return out["activity_probability"].squeeze(-1)
 
     @torch.no_grad()

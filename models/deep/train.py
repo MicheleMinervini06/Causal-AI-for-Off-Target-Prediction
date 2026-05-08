@@ -51,8 +51,13 @@ def train_epoch(
         off_targets = batch["off_targets"]
         labels = batch["labels"].to(device)
 
+        # Estrazione del contesto esogeno (U)
+        context_features = batch.get("context_features")
+        if context_features is not None:
+            context_features = context_features.to(device)
+
         # FORWARD 1: Batch Osservazionale
-        out_base = model(sgrnas, off_targets)
+        out_base = model(sgrnas, off_targets, context_features=context_features)
         y_pred = out_base["activity_probability"].squeeze(-1)
         all_train_scores.extend(y_pred.detach().cpu().numpy())
         all_train_labels.extend(labels.detach().cpu().numpy())
@@ -67,7 +72,7 @@ def train_epoch(
 
         # FORWARD 2: Batch Intervenuto (se presente nel batch corrente)
         if sgrnas_mut is not None and off_targets_mut is not None:
-            out_mut = model(sgrnas_mut, off_targets_mut)
+            out_mut = model(sgrnas_mut, off_targets_mut, context_features=context_features)
             
             masks = batch.get("unaltered_masks")
             if masks is not None:
@@ -170,7 +175,12 @@ def evaluate(
         off_targets = batch["off_targets"]
         labels = batch["labels"]
         
-        preds = model.predict_proba_batch(sgrnas, off_targets)
+        # Estrazione del contesto esogeno (U) per l'inferenza
+        context_features = batch.get("context_features")
+        if context_features is not None:
+            context_features = context_features.to(device)
+
+        preds = model.predict_proba_batch(sgrnas, off_targets, context_features=context_features)
         
         all_preds.extend(preds.cpu().numpy())
         
@@ -243,13 +253,24 @@ def train(
             max_lr=lr,
             steps_per_epoch=len(train_loader),
             epochs=epochs,
-            pct_start=train_cfg.get("scheduler_pct_start", 0.3),
+            pct_start=train_cfg.get("pct_start", 0.3),
             cycle_momentum=False,
         )
-        logger.info("OneCycleLR scheduler attivato: max_lr=%.6f pct_start=%.2f", lr, train_cfg.get("scheduler_pct_start", 0.3))
+        logger.info("OneCycleLR scheduler attivato: max_lr=%.6f pct_start=%.2f", lr, train_cfg.get("pct_start", 0.3))
+
+        # # --- NUOVO SCHEDULER: ReduceLROnPlateau ---
+        # scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        #     optimizer, 
+        #     mode='max',           # Monitoriamo una metrica da massimizzare (AUPRC)
+        #     factor=0.5,           # Dimezza il LR quando entra in plateau
+        #     patience=3,           # Aspetta 3 epoche senza miglioramenti prima di tagliare
+        #     min_lr=1e-6          # Non scendere sotto questo limite
+        #)
+        #logger.info("ReduceLROnPlateau scheduler attivato (monitoraggio Val AUPRC)")
+
     except Exception as e:
         scheduler = None
-        logger.warning("Impossibile istanziare OneCycleLR: %s. Continuo senza scheduler.", e)
+        logger.warning("Impossibile istanziare Scheduler: %s. Continuo senza scheduler.", e)
 
     best_auprc = -1.0
     best_model_state = None
@@ -291,6 +312,10 @@ def train(
         l2_norm = sum(p.norm(2).item() ** 2 for p in model.parameters()) ** 0.5
         current_lr = optimizer.param_groups[0]["lr"]
 
+        # # Step dello scheduler ReduceLROnPlateau basato sulla AUPRC di validazione
+        # if scheduler is not None:
+        #     scheduler.step(current_auprc)
+
         logger.info(
             f"Epoch {epoch+1:03d} | IRM Lambda: {current_lambda_irm:.2f} | "
             f"Loss: {train_metrics['train_loss']:.4f} "
@@ -321,23 +346,31 @@ def train(
                 
             tracker.log_metrics(tracker_metrics, step=epoch + 1)
 
-        # Calcolo dei pesi effettivi
-        w_prox_eff = -F.softplus(getattr(model, "w_proximal")).detach().cpu().item()
-        w_nonseed_base = F.softplus(getattr(model, "w_nonseed")).detach().cpu().item()
-        w_seed_extra = F.softplus(getattr(model, "w_seed")).detach().cpu().item()
-        
-        w_nonseed_eff = -w_nonseed_base
-        w_seed_eff = -(w_nonseed_base + w_seed_extra)
-        
+        # Calcolo del bias effettivo (Comune a tutti)
         try:
             bias_eff = float(torch.clamp(getattr(model, "bias"), min=-4.0, max=3.0).detach().cpu().item())
         except Exception:
             bias_eff = float(getattr(model, "bias").detach().cpu().item())
 
-        logger.info(
-            f"   Combiner (Effettivi): w_prox={w_prox_eff:.4f} "
-            f"w_seed={w_seed_eff:.4f} w_nonseed={w_nonseed_eff:.4f} bias={bias_eff:.4f}"
-        )
+        # Logging specifico per architettura
+        if getattr(model, "architecture", "") == "positional_mlp":
+            # Estraiamo i 20 pesi e formattiamoli
+            w_pos_eff = -F.softplus(getattr(model, "w_pos")).detach().cpu().numpy()
+            w_pos_str = " ".join([f"{w:.2f}" for w in w_pos_eff])
+            logger.info(f"   Positional Weights: [{w_pos_str}] | bias={bias_eff:.4f}")
+        else:
+            # Vecchio logging per i 3 pesi
+            w_prox_eff = -F.softplus(getattr(model, "w_proximal")).detach().cpu().item()
+            w_nonseed_base = F.softplus(getattr(model, "w_nonseed")).detach().cpu().item()
+            w_seed_extra = F.softplus(getattr(model, "w_seed")).detach().cpu().item()
+            
+            w_nonseed_eff = -w_nonseed_base
+            w_seed_eff = -(w_nonseed_base + w_seed_extra)
+            
+            logger.info(
+                f"   Combiner (Effettivi): w_prox={w_prox_eff:.4f} "
+                f"w_seed={w_seed_eff:.4f} w_nonseed={w_nonseed_eff:.4f} bias={bias_eff:.4f}"
+            )
 
         if current_auprc > best_auprc:
             best_auprc = current_auprc
