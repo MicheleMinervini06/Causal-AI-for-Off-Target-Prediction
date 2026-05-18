@@ -12,7 +12,7 @@ from torch.optim.lr_scheduler import OneCycleLR
 from sklearn.metrics import average_precision_score, f1_score, roc_auc_score
 from torch.utils.data import DataLoader
 
-from .losses import NeuralSCMLoss, FocalNeuralSCMLoss, compute_irm_penalty
+from .losses import NeuralSCMLoss, FocalNeuralSCMLoss, VariationalFocalNeuralSCMLoss, compute_irm_penalty
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +25,8 @@ def train_epoch(
     device: torch.device,
     scheduler: Any | None = None,
     current_lambda_irm: float = 0.0,  # Typo corretto
-    pos_weight: float = 1.0           # Default a 1.0 come richiesto
+    pos_weight: float = 1.0,          # Default a 1.0 come richiesto
+    current_beta_kl: float | None = None,  # Solo per modelli variational (KL warmup)
 ) -> dict[str, float]:
     """
     Esegue una singola epoca di addestramento.
@@ -33,19 +34,22 @@ def train_epoch(
     Include la regolarizzazione causale IRM.
     """
     model.train()
-    
+
+    is_variational = bool(getattr(model, "variational", False))
+
     total_loss = 0.0
     total_pred = 0.0
     total_causal = 0.0
     total_consist = 0.0
     total_irm = 0.0  # Nuovo contatore per tracciare il peso dell'IRM
+    total_kl = 0.0   # Solo se variational
     steps = 0
     all_train_scores = []
     all_train_labels = []
 
     for batch in loader:
         optimizer.zero_grad()
-        
+
         # Unpacking esplicito via dizionario
         sgrnas = batch["sgrnas"]
         off_targets = batch["off_targets"]
@@ -56,8 +60,40 @@ def train_epoch(
         if context_features is not None:
             context_features = context_features.to(device)
 
-        # FORWARD 1: Batch Osservazionale
-        out_base = model(sgrnas, off_targets, context_features=context_features)
+        # --- Variational path: q(U | structural_logit, y) -> sampling via reparameterization ---
+        # Razionale: l'encoder_U deve modellare il residuo causale (gap fra predizione
+        # strutturale e osservazione), non re-imparare lo spazio sequenza. Per questo:
+        #   1) facciamo un forward U-less per ottenere `structural_logit`
+        #   2) encode_U riceve (structural_logit, y) -> q(U|x,y)
+        #   3) sampliamo U e rieseguiamo il forward iniettando U nel logit
+        mu_U = None
+        log_sigma_U = None
+        U_sample = None
+
+        if is_variational:
+            # Pass strutturale: niente U, fornisce il logit di backbone.
+            # Se detach_backbone=True ci basta no_grad (zero costo memoria).
+            if getattr(model, "u_encoder_detach_backbone", True):
+                with torch.no_grad():
+                    out_struct = model(
+                        sgrnas, off_targets,
+                        context_features=context_features,
+                        U=None,
+                    )
+                structural_logit = out_struct["logit"].squeeze(-1)
+            else:
+                out_struct = model(
+                    sgrnas, off_targets,
+                    context_features=context_features,
+                    U=None,
+                )
+                structural_logit = out_struct["logit"].squeeze(-1)
+
+            mu_U, log_sigma_U = model.encode_U(structural_logit, labels)
+            U_sample = model.reparameterize(mu_U, log_sigma_U)
+
+        # FORWARD 1: Batch Osservazionale (passiamo U solo se variational)
+        out_base = model(sgrnas, off_targets, context_features=context_features, U=U_sample)
         y_pred = out_base["activity_probability"].squeeze(-1)
         all_train_scores.extend(y_pred.detach().cpu().numpy())
         all_train_labels.extend(labels.detach().cpu().numpy())
@@ -71,26 +107,45 @@ def train_epoch(
         off_targets_mut = batch.get("off_targets_mut")
 
         # FORWARD 2: Batch Intervenuto (se presente nel batch corrente)
+        # NOTA: per il controfattuale usiamo lo stesso U del fattuale (Pearl: U invariante sotto do)
         if sgrnas_mut is not None and off_targets_mut is not None:
-            out_mut = model(sgrnas_mut, off_targets_mut, context_features=context_features)
-            
+            out_mut = model(
+                sgrnas_mut,
+                off_targets_mut,
+                context_features=context_features,
+                U=U_sample,
+            )
+
             masks = batch.get("unaltered_masks")
             if masks is not None:
                 unaltered_masks = {k: v.to(device) for k, v in masks.items()}
-                
+
             exp_dir = batch.get("expected_direction")
             if exp_dir is not None:
                 expected_direction = exp_dir.to(device)
 
         # Calcolo unificato della Loss
-        loss_dict = loss_fn(
-            y_pred=y_pred,
-            y_true=labels,
-            out_base=out_base,
-            out_mut=out_mut,
-            unaltered_masks=unaltered_masks,
-            expected_direction=expected_direction
-        )
+        if is_variational:
+            loss_dict = loss_fn(
+                y_pred=y_pred,
+                y_true=labels,
+                out_base=out_base,
+                out_mut=out_mut,
+                unaltered_masks=unaltered_masks,
+                expected_direction=expected_direction,
+                mu_U=mu_U,
+                log_sigma_U=log_sigma_U,
+                beta_kl_override=current_beta_kl,
+            )
+        else:
+            loss_dict = loss_fn(
+                y_pred=y_pred,
+                y_true=labels,
+                out_base=out_base,
+                out_mut=out_mut,
+                unaltered_masks=unaltered_masks,
+                expected_direction=expected_direction,
+            )
 
         loss = loss_dict["loss"]
 
@@ -127,6 +182,9 @@ def train_epoch(
         total_consist += loss_dict.get("loss_consist", torch.tensor(0.0)).item()
         total_causal += loss_dict.get("loss_causal", torch.tensor(0.0)).item()
         total_irm += irm_val
+        kl_t = loss_dict.get("loss_kl")
+        if kl_t is not None:
+            total_kl += float(kl_t.item())
         steps += 1
 
     # Calcolo metriche
@@ -150,6 +208,7 @@ def train_epoch(
         "train_consist_loss": total_consist / steps,
         "train_causal_loss": total_causal / steps,
         "train_irm_loss": total_irm / steps,  # Utile per monitoraggio W&B
+        "train_kl_loss": total_kl / steps,
         "train_auprc": train_auprc,
         "train_auroc": train_auroc,
         "train_f1": train_f1,
@@ -158,9 +217,10 @@ def train_epoch(
 
 @torch.no_grad()
 def evaluate(
-    model: Any, 
-    loader: DataLoader, 
-    device: torch.device
+    model: Any,
+    loader: DataLoader,
+    device: torch.device,
+    mc_samples: int = 1,
 ) -> dict[str, float]:
     """
     Valuta il modello sul dataset corrente (Validation o Test).
@@ -180,7 +240,7 @@ def evaluate(
         if context_features is not None:
             context_features = context_features.to(device)
 
-        preds = model.predict_proba_batch(sgrnas, off_targets, context_features=context_features)
+        preds = model.predict_proba_batch(sgrnas, off_targets, context_features=context_features, mc_samples=mc_samples)
         
         all_preds.extend(preds.cpu().numpy())
         
@@ -225,9 +285,20 @@ def train(
     irm_warmup = train_cfg.get("irm_warmup_epochs", 5)
     pos_weight_val = train_cfg.get("pos_weight", 1.0)  # Default a 1.0 se non specificato
     
-    loss_type = train_cfg.get("loss_type", "bce") 
+    loss_type = train_cfg.get("loss_type", "bce")
+    is_variational = bool(getattr(model, "variational", False))
 
-    if loss_type == "bce":
+    if is_variational:
+        # Modello variational -> ELBO. Forziamo Focal come reconstruction term.
+        logger.info("Modello variational rilevato: inizializzazione VariationalFocalNeuralSCMLoss")
+        loss_fn = VariationalFocalNeuralSCMLoss(
+            alpha=train_cfg.get("focal_alpha", 0.25),
+            gamma=train_cfg.get("focal_gamma", 2.0),
+            lambda_causal=train_cfg.get("lambda_causal", 0.01),
+            lambda_consist=train_cfg.get("lambda_consist", 0.01),
+            beta_kl=train_cfg.get("beta_kl_max", 1.0),
+        ).to(device)
+    elif loss_type == "bce":
         logger.info("Inizializzazione NeuralSCMLoss classica (BCE + pos_weight)")
         loss_fn = NeuralSCMLoss(
             pos_weight=pos_weight_val,
@@ -243,7 +314,11 @@ def train(
             lambda_consist=train_cfg.get("lambda_consist", 0.01)
         ).to(device)
     else:
-        raise ValueError(f"Tipo di loss sconosciuto: {loss_type}")    
+        raise ValueError(f"Tipo di loss sconosciuto: {loss_type}")
+
+    # Parametri Variational (KL warmup)
+    beta_kl_max = float(train_cfg.get("beta_kl_max", 1.0))
+    kl_warmup_epochs = int(train_cfg.get("kl_warmup_epochs", 5))
     
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
 
@@ -293,6 +368,17 @@ def train(
         else:
             current_lambda_irm = 0.0
 
+        # --- 1b. WARMUP DINAMICO KL (solo se variational) ---
+        current_beta_kl = None
+        if is_variational:
+            if kl_warmup_epochs <= 0:
+                current_beta_kl = beta_kl_max
+            elif epoch >= kl_warmup_epochs:
+                current_beta_kl = beta_kl_max
+            else:
+                # Ramp lineare 0 -> beta_kl_max nei primi kl_warmup_epochs
+                current_beta_kl = beta_kl_max * (epoch + 1) / float(kl_warmup_epochs)
+
         # --- 2. TRAIN EPOCH ---
         train_metrics = train_epoch(
             model=model,
@@ -302,7 +388,8 @@ def train(
             device=device,
             scheduler=scheduler,
             current_lambda_irm=current_lambda_irm, # Passiamo il lambda IRM
-            pos_weight=pos_weight_val
+            pos_weight=pos_weight_val,
+            current_beta_kl=current_beta_kl,
         )
         
         val_metrics = evaluate(model, val_loader, device)
@@ -316,10 +403,17 @@ def train(
         # if scheduler is not None:
         #     scheduler.step(current_auprc)
 
+        var_part = ""
+        if is_variational:
+            var_part = (
+                f" | KL: {train_metrics.get('train_kl_loss', 0.0):.4f}"
+                f" beta: {current_beta_kl if current_beta_kl is not None else 0.0:.3f}"
+            )
+
         logger.info(
             f"Epoch {epoch+1:03d} | IRM Lambda: {current_lambda_irm:.2f} | "
             f"Loss: {train_metrics['train_loss']:.4f} "
-            f"(P:{train_metrics['train_pred_loss']:.4f} C:{train_metrics['train_causal_loss']:.4f}) | "
+            f"(P:{train_metrics['train_pred_loss']:.4f} C:{train_metrics['train_causal_loss']:.4f}){var_part} | "
             f"Train AUPRC: {train_metrics['train_auprc']:.4f} | "
             f"Train AUROC: {train_metrics['train_auroc']:.4f} | "
             f"Val AUPRC: {current_auprc:.4f} | Val AUROC: {val_metrics['auroc']:.4f} | "
@@ -343,7 +437,11 @@ def train(
             }
             if irm_enabled:
                 tracker_metrics["train/lambda_irm"] = current_lambda_irm
-                
+
+            if is_variational:
+                tracker_metrics["train/loss_kl"] = train_metrics.get("train_kl_loss", 0.0)
+                tracker_metrics["train/beta_kl"] = float(current_beta_kl) if current_beta_kl is not None else 0.0
+
             tracker.log_metrics(tracker_metrics, step=epoch + 1)
 
         # Calcolo del bias effettivo (Comune a tutti)

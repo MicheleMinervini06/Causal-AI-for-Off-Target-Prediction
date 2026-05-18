@@ -147,6 +147,78 @@ class FocalNeuralSCMLoss(NeuralSCMLoss):
         return focal.mean()
     
 
+class VariationalFocalNeuralSCMLoss(FocalNeuralSCMLoss):
+    """
+    Estensione variational della FocalNeuralSCMLoss.
+
+    Aggiunge un termine KL( q(U|x,y) || N(0,1) ) al training objective per
+    promuovere un latente U coerente col prior gaussiano standard (rumore esogeno).
+
+    Le tre componenti causali esistenti (predictive/focal, consistency, causal)
+    restano invariate: l'ELBO è additivo rispetto ai regolarizzatori comportamentali.
+    """
+
+    def __init__(
+        self,
+        alpha: float = 0.25,
+        gamma: float = 2.0,
+        lambda_causal: float = 0.01,
+        lambda_consist: float = 0.01,
+        beta_kl: float = 1.0,
+    ):
+        super().__init__(
+            alpha=alpha,
+            gamma=gamma,
+            lambda_causal=lambda_causal,
+            lambda_consist=lambda_consist,
+        )
+        self.beta_kl = beta_kl
+
+    @staticmethod
+    def kl_loss(mu_U: torch.Tensor, log_sigma_U: torch.Tensor) -> torch.Tensor:
+        """
+        KL[ N(mu, sigma^2) || N(0, 1) ] in forma chiusa, mediata sul batch.
+        Formula: 0.5 * ( mu^2 + sigma^2 - 1 - 2*log(sigma) )
+        """
+        sigma_sq = (2.0 * log_sigma_U).exp()
+        return 0.5 * (mu_U ** 2 + sigma_sq - 1.0 - 2.0 * log_sigma_U).mean()
+
+    def forward(
+        self,
+        y_pred: torch.Tensor,
+        y_true: torch.Tensor,
+        out_base: dict | None = None,
+        out_mut: dict | None = None,
+        unaltered_masks: dict[str, torch.Tensor] | None = None,
+        expected_direction: torch.Tensor | None = None,
+        mu_U: torch.Tensor | None = None,
+        log_sigma_U: torch.Tensor | None = None,
+        beta_kl_override: float | None = None,
+    ) -> dict[str, torch.Tensor]:
+
+        base_dict = super().forward(
+            y_pred=y_pred,
+            y_true=y_true,
+            out_base=out_base,
+            out_mut=out_mut,
+            unaltered_masks=unaltered_masks,
+            expected_direction=expected_direction,
+        )
+
+        # Termine KL (solo se forniti mu/log_sigma)
+        loss_kl = torch.tensor(0.0, device=base_dict["loss"].device)
+        if mu_U is not None and log_sigma_U is not None:
+            loss_kl = self.kl_loss(mu_U, log_sigma_U)
+
+        # beta puo' essere overridato dal training loop (KL warmup)
+        beta = self.beta_kl if beta_kl_override is None else float(beta_kl_override)
+
+        base_dict["loss"] = base_dict["loss"] + beta * loss_kl
+        base_dict["loss_kl"] = loss_kl
+        base_dict["beta_kl"] = torch.tensor(beta, device=loss_kl.device)
+        return base_dict
+
+
 def compute_irm_penalty(logits: torch.Tensor, targets: torch.Tensor, environments: list[str], pos_weight: float) -> torch.Tensor:
     """
     Calcola l'IRMv1 penalty raggruppando i campioni del batch per guida.

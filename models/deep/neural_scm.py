@@ -17,16 +17,21 @@ class NeuralSCM(nn.Module):
     """
 
     def __init__(
-        self, 
-        architecture: str = "mini_mlp", 
-        embed_dim: int = 16, 
+        self,
+        architecture: str = "mini_mlp",
+        embed_dim: int = 16,
         hidden_dim: int = 4,  # SOLO UNO! Sarà 4 o 32 a seconda di cosa gli passiamo
         encoder: BaseEncoder | None = None,
-        context_dim: int = 0
+        context_dim: int = 0,
+        variational: bool = False,
+        variational_hidden_dim: int = 32,
+        u_encoder_detach_backbone: bool = True,
     ):
         super().__init__()
         self.architecture = architecture
         self.context_dim = context_dim
+        self.variational = variational
+        self.u_encoder_detach_backbone = u_encoder_detach_backbone
 
         # 1. Inizializzazione Encoder
         if encoder is None:
@@ -105,15 +110,99 @@ class NeuralSCM(nn.Module):
                 nn.ReLU(),
                 nn.Linear(hidden_dim * 2, hidden_dim),
                 nn.ReLU(),
-                nn.Linear(hidden_dim, 1) 
+                nn.Linear(hidden_dim, 1)
             )
 
+        # Inference network q(U | x, y) per Variational SCM (ELBO training).
+        # Input minimalista (2-dim): (structural_logit, y).
+        # Razionale: forza l'encoder a modellare la *discrepanza* (residuo abduzione di
+        # Pearl) invece di apprendere uno spazio latente "stilistico" su x.
+        # Previene il caso in cui le ~80 feature di sequenza dominino la 1 feature label.
+        if self.variational:
+            self._u_feat_dim = 2  # (structural_logit, y)
+            self.encoder_U = nn.Sequential(
+                nn.Linear(self._u_feat_dim, variational_hidden_dim),
+                nn.ReLU(),
+                nn.Linear(variational_hidden_dim, variational_hidden_dim),
+                nn.ReLU(),
+                nn.Linear(variational_hidden_dim, 2),
+            )
+
+    @staticmethod
+    def _typed_mismatch_encoding(sgrnas: list[str], off_targets: list[str], device: torch.device) -> torch.Tensor:
+        """
+        Calcola la typed-mismatch encoding [B, 20, 4] (Match, Wobble, Transition, Transversion).
+        Esposto come helper riusabile (es. inference network q(U|x,y)).
+        """
+        def get_mismatch_type(sg_char: str, ot_char: str) -> list[float]:
+            if sg_char == ot_char:
+                return [1.0, 0.0, 0.0, 0.0]
+            pair = {sg_char, ot_char}
+            if pair == {'G', 'T'}:
+                return [0.0, 1.0, 0.0, 0.0]
+            if pair in [{'A', 'G'}, {'C', 'T'}]:
+                return [0.0, 0.0, 1.0, 0.0]
+            return [0.0, 0.0, 0.0, 1.0]
+
+        typed_batch = [
+            [get_mismatch_type(sg[i], ot[i]) for i in range(20)]
+            for sg, ot in zip(sgrnas, off_targets)
+        ]
+        return torch.tensor(typed_batch, dtype=torch.float32, device=device)
+
+    def encode_U(
+        self,
+        structural_logit: torch.Tensor,
+        y: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Inference network q(U | x, y) sul *residuo abduzione*.
+
+        Input (2-dim per esempio):
+          - structural_logit: logit prodotto dal backbone causale SENZA U
+            (i.e., thermo_logit + context_logit). Rappresenta la predizione
+            strutturale ("ciò che la fisica dice").
+          - y: label osservata ("ciò che è stato misurato").
+
+        L'MLP impara a mappare (predizione, osservazione) -> distribuzione su U,
+        cioè a stimare la discrepanza non-strutturale (rumore esogeno).
+        Se `self.u_encoder_detach_backbone` è True, stacca `structural_logit` dal
+        grafo per evitare che il gradiente della KL re-tiri i pesi del backbone.
+
+        Restituisce (mu_U, log_sigma_U) come tensori [B, 1].
+        """
+        if not self.variational:
+            raise RuntimeError("encode_U richiede variational=True alla costruzione del modello")
+
+        device = next(self.parameters()).device
+
+        sl = structural_logit.reshape(-1, 1).to(device=device, dtype=torch.float32)
+        if self.u_encoder_detach_backbone:
+            sl = sl.detach()
+
+        y_col = y.reshape(-1, 1).to(device=device, dtype=torch.float32)
+        feat = torch.cat([sl, y_col], dim=-1)  # [B, 2]
+
+        out = self.encoder_U(feat)  # [B, 2]
+        mu_U, log_sigma_U = out.chunk(2, dim=-1)
+        # Clamping per stabilità numerica (sigma in [~0.0067, ~7.4])
+        log_sigma_U = torch.clamp(log_sigma_U, min=-5.0, max=2.0)
+        return mu_U, log_sigma_U
+
+    @staticmethod
+    def reparameterize(mu: torch.Tensor, log_sigma: torch.Tensor) -> torch.Tensor:
+        """Reparameterization trick: U = mu + sigma * eps, eps ~ N(0,1)."""
+        sigma = log_sigma.exp()
+        eps = torch.randn_like(mu)
+        return mu + sigma * eps
+
     def _base_forward(
-        self, 
-        sgrnas: list[str], 
-        off_targets: list[str], 
+        self,
+        sgrnas: list[str],
+        off_targets: list[str],
         context_features: torch.Tensor | None = None,
-        intervention: dict[str, float] | None = None
+        intervention: dict[str, float] | None = None,
+        U: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
         
         if intervention is None:
@@ -260,8 +349,16 @@ class NeuralSCM(nn.Module):
             s_nonseed = torch.full((B, 1), intervention["non_seed"], device=device, dtype=torch.float32) if "non_seed" in intervention else self.nonseed_node(mm_nonseed)
         
         elif self.architecture == "positional_mlp":
+            # DAG di positional_mlp: i 20 nodi posizionali P_0..P_19 sono i
+            # *veri* nodi causali intermedi. Le aggregazioni regionali (seed,
+            # proximal, non_seed) sono solo viste-somma per logging — NON sono
+            # nodi causali separati per questa architettura. Quindi:
+            #   - intervention["pos_<i>"]  con i in [0,19]  → SUPPORTATO
+            #   - intervention["seed"|"proximal"|"non_seed"] → IGNORATO
+            # Per intervenire su un'intera regione, specificare tutti i pos_<i>
+            # della regione (es. seed = pos_8..pos_15).
             typed_batch = []
-            
+
             def get_mismatch_type(sg_char, ot_char):
                 if sg_char == ot_char: return [1.0, 0.0, 0.0, 0.0]
                 pair = {sg_char, ot_char}
@@ -272,16 +369,32 @@ class NeuralSCM(nn.Module):
             for sg, ot in zip(sgrnas, off_targets):
                 seq_encoding = [get_mismatch_type(sg[i], ot[i]) for i in range(20)]
                 typed_batch.append(seq_encoding)
-                
+
             # Tensore [Batch, 20, 4]
             s_typed = torch.tensor(typed_batch, dtype=torch.float32, device=device)
-            
+
             # Passiamo tutte le posizioni attraverso la MLP condivisa
             # Output: [Batch, 20, 1] -> squeeze -> [Batch, 20]
             pos_penalties = self.pos_node(s_typed).squeeze(-1)
             pos_penalties = F.relu(pos_penalties) # Normalizza output negativi
-            
-            # Salviamo nei vecchi scalari la somma delle zone solo per retrocompatibilità coi log
+
+            # do() sui nodi causali posizionali P_0..P_19
+            pos_interventions = {k: v for k, v in intervention.items() if k.startswith("pos_")}
+            if pos_interventions:
+                pos_penalties = pos_penalties.clone()
+                for key, value in pos_interventions.items():
+                    try:
+                        i = int(key.split("_", 1)[1])
+                    except (IndexError, ValueError) as e:
+                        raise ValueError(
+                            f"Intervention key '{key}' deve essere nel formato 'pos_<i>' con i in [0,19]"
+                        ) from e
+                    if not (0 <= i < 20):
+                        raise ValueError(f"Position index {i} fuori range [0,19]")
+                    pos_penalties[:, i] = float(value)
+
+            # Aggregazioni regionali — derivate dai P_i (eventualmente intervenuti),
+            # non nodi causali separati. Mantenute nell'output per retrocompatibilità.
             s_nonseed = pos_penalties[:, 0:8].sum(dim=1, keepdim=True)
             s_seed = pos_penalties[:, 8:16].sum(dim=1, keepdim=True)
             s_prox = pos_penalties[:, 16:20].sum(dim=1, keepdim=True)
@@ -322,11 +435,19 @@ class NeuralSCM(nn.Module):
         # --- IBRIDAZIONE CAUSALE (Iniezione di U) ---  <--- NUOVO BLOCCO
         final_logit = thermo_logit
         context_logit = torch.zeros_like(thermo_logit)
-        
+
         if self.context_dim > 0 and context_features is not None:
             context_logit = self.context_net(context_features)
             final_logit = thermo_logit + context_logit # Somma additiva: Fisica + Ambiente
-        
+
+        # --- Iniezione del rumore esogeno latente U (Variational SCM) ---
+        # Se U non viene passato (es. inferenza standard o modello non variational),
+        # è equivalente a U=0 (mean del prior N(0,1)).
+        u_term = torch.zeros_like(thermo_logit)
+        if U is not None:
+            u_term = U.reshape(-1, 1).to(final_logit.device)
+            final_logit = final_logit + u_term
+
         activity_prob = pam_gate * torch.sigmoid(final_logit)
 
         return {
@@ -336,6 +457,7 @@ class NeuralSCM(nn.Module):
             "nonseed_scalar": s_nonseed,
             "thermo_logit": thermo_logit,
             "context_logit": context_logit,
+            "u_term": u_term,
             "logit": final_logit,
             "activity_probability": activity_prob,
             "repr_pam": repr_pam,
@@ -344,18 +466,50 @@ class NeuralSCM(nn.Module):
             "repr_nonseed": repr_nonseed
         }
 
-    def forward(self, sgrnas: list[str] | str, off_targets: list[str] | str, context_features: torch.Tensor | None = None) -> dict[str, torch.Tensor]:
+    def forward(
+        self,
+        sgrnas: list[str] | str,
+        off_targets: list[str] | str,
+        context_features: torch.Tensor | None = None,
+        U: torch.Tensor | None = None,
+    ) -> dict[str, torch.Tensor]:
         if isinstance(sgrnas, str): sgrnas = [sgrnas]
         if isinstance(off_targets, str): off_targets = [off_targets]
-        return self._base_forward(sgrnas, off_targets, context_features=context_features)
+        return self._base_forward(sgrnas, off_targets, context_features=context_features, U=U)
 
-    def do(self, sgrnas: list[str] | str, off_targets: list[str] | str, intervention: dict[str, float], context_features: torch.Tensor | None = None) -> dict[str, torch.Tensor]:
+    def do(
+        self,
+        sgrnas: list[str] | str,
+        off_targets: list[str] | str,
+        intervention: dict[str, float],
+        context_features: torch.Tensor | None = None,
+        U: torch.Tensor | None = None,
+    ) -> dict[str, torch.Tensor]:
         if isinstance(sgrnas, str): sgrnas = [sgrnas]
         if isinstance(off_targets, str): off_targets = [off_targets]
-        return self._base_forward(sgrnas, off_targets, context_features=context_features, intervention=intervention)
+        return self._base_forward(sgrnas, off_targets, context_features=context_features, intervention=intervention, U=U)
 
-    def predict_proba_batch(self, sgrnas: list[str], off_targets: list[str], context_features: torch.Tensor | None = None) -> torch.Tensor:
-        out = self._base_forward(sgrnas, off_targets, context_features=context_features)
+    def predict_proba_batch(
+        self,
+        sgrnas: list[str],
+        off_targets: list[str],
+        context_features: torch.Tensor | None = None,
+        U: torch.Tensor | None = None,
+        mc_samples: int = 1,
+    ) -> torch.Tensor:
+        # MC marginalization: p(y|x) = E_{U~N(0,1)}[p(y|x,U)]
+        # Corregge il label leakage del training: durante il training U=encode_U(struct,y),
+        # all'inferenza non abbiamo y, quindi marginalizzare sul prior è la scelta corretta.
+        if self.variational and U is None and mc_samples > 1:
+            device = next(self.parameters()).device
+            B = len(sgrnas)
+            preds = []
+            for _ in range(mc_samples):
+                U_k = torch.randn(B, device=device)
+                out_k = self._base_forward(sgrnas, off_targets, context_features=context_features, U=U_k)
+                preds.append(out_k["activity_probability"].squeeze(-1))
+            return torch.stack(preds).mean(0)
+        out = self._base_forward(sgrnas, off_targets, context_features=context_features, U=U)
         return out["activity_probability"].squeeze(-1)
 
     @torch.no_grad()
