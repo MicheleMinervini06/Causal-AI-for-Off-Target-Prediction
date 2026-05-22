@@ -6,37 +6,21 @@ Default model: Exp18_Positional_AdditivePAM (pam_mode=additive, encoding 4-dim).
 Interventi implementati:
   1) truncate_5p          (sequence-level):  guide → "NN" + guide[2:]
   2) do(pos_14=0)         (DAG node-level):  forza penalità a 0 sul nodo P_14
-  3) diversity ACGT       (sequence-level, Treatment-Control):
-       Treatment: guide[16:20] = "ACGT"  (massima diversità A/C/G/T)
-       Control:   guide[16:20] = "AAAA"  (nessuna diversità)
-  4) repeat seed          (sequence-level, Treatment-Control):
-       Treatment: guide[8:16] = "ATATATAT"  (perfect period-2 repeat)
-       Control:   guide[8:16] = "AAAATTTT"  (stessa composizione, no period-2)
+  3) diversity ACGT       (sequence-level, Treatment-Control)
+  4) repeat seed          (sequence-level, Treatment-Control)
 
-Modalità PAM (selezionabile via --pam-mode, default "additive" per Exp18):
+Calibrazione assay (P1): tramite `--assay-shift <float>` o
+`--assay-shift-from <path/to/calibration.json>` si applica un offset additivo
+al logit del modello prima dell'abduction. È pensato per il caso "modello
+addestrato su CHANGE-seq, valutato su GUIDE-seq" — il shift `b̂` viene stimato
+da `calibrate_assay_shift.py` su un piccolo set di calibrazione.
 
-  Multiplicative (Run 15 e precedenti):  activity = pam_gate * σ(struct_logit + U)
-    Abduction:  U = logit(y_obs / pam_gate) - struct_logit   (con clipping per y_obs > pam_gate)
-    CF:         y_cf = pam_gate_cf * σ(struct_logit_cf + U)
-
-  Additive (Run 18+, fix F17 della saturazione pam_gate):
-                                          activity = σ(struct_logit + pam_logit + U)
-                                          (NB: out["logit"] include già pam_logit)
-    Abduction:  U = logit(y_obs) - out["logit"]              (nessun clipping artifact)
-    CF:         y_cf = σ(out_cf["logit"] + U)
-
-NOTA EPISTEMICA sui 4 interventi:
-  L'architettura positional_mlp processa ogni posizione in modo indipendente
-  (kernel=1). Non può rappresentare diversità (joint property) o ripetizione
-  (cross-position property). Gli interventi diversity/repeat sono inclusi come
-  baseline diagnostico per evidenziare empiricamente questa limitazione.
-
-Contrasto Treatment-Control (per interventi 3 e 4):
-  delta_TC = y_cf_T - y_cf_C  → effetto "puro" dell'intervento isolato.
+Helper condivisi: vedi `_intervention_utils.py`.
 """
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -45,131 +29,19 @@ import pandas as pd
 import seaborn as sns
 import torch
 
-from models.deep.encoding import BiologicalMismatchEncoder
-from models.deep.neural_scm import NeuralSCM
-
-
-# ---------- costanti ----------
-EPS = 1e-7
-
-
-# ---------- utility numeriche vettorizzate ----------
-
-def reads_to_prob(reads: np.ndarray, max_reads: np.ndarray, method: str = "log") -> np.ndarray:
-    reads = np.maximum(0, reads).astype(np.float64)
-    max_reads = np.maximum(reads, max_reads).astype(np.float64)
-    if method == "log":
-        p = np.log1p(reads) / np.log1p(max_reads)
-    elif method == "linear":
-        p = reads / max_reads
-    else:
-        raise ValueError(f"Metodo {method} non supportato.")
-    return np.minimum(p * 100.0, 99.0)
-
-
-def sigmoid(x: np.ndarray) -> np.ndarray:
-    return 1.0 / (1.0 + np.exp(-x))
-
-
-def gc_fraction(seq: str) -> float:
-    return sum(1 for c in seq if c in "GC") / max(len(seq), 1)
-
-
-def compute_gc_context_batch(guides: list[str], targets: list[str], device: torch.device) -> torch.Tensor:
-    gc_sg = np.array([gc_fraction(g) for g in guides], dtype=np.float32)
-    gc_tg = np.array([gc_fraction(t) for t in targets], dtype=np.float32)
-    delta = gc_sg - gc_tg
-    arr = np.stack([gc_sg, gc_tg, delta], axis=1)
-    return torch.tensor(arr, dtype=torch.float32, device=device)
-
-
-# ---------- abduzione e controfattuale (mode-aware) ----------
-
-def abduct_U(
-    y_obs_prob_pct: np.ndarray,
-    struct_logit: np.ndarray,
-    pam_gate: np.ndarray,
-    pam_mode: str = "additive",
-) -> np.ndarray:
-    """
-    Abduzione Pearl-corretta, formula dipendente da pam_mode.
-
-    additive (Run 18+):  U = logit(y_obs) - struct_logit
-        Il modello è activity = σ(struct_logit + U), con struct_logit
-        che già include il contributo PAM (out["logit"] dal forward).
-        Nessun clipping artifact: y_obs ∈ (0, 1) sempre.
-
-    multiplicative (Run 15):  U = logit(y_obs / pam_gate) - struct_logit
-        Il modello è activity = pam_gate * σ(struct_logit + U).
-        Richiede clipping a (EPS, 1-EPS) per gestire y_obs ≥ pam_gate.
-    """
-    if pam_mode == "additive":
-        p_unit = np.clip(y_obs_prob_pct / 100.0, EPS, 1.0 - EPS)
-    elif pam_mode == "multiplicative":
-        p_unit = np.clip(y_obs_prob_pct / 100.0 / pam_gate, EPS, 1.0 - EPS)
-    else:
-        raise ValueError(f"pam_mode non riconosciuto: {pam_mode}")
-    return np.log(p_unit / (1.0 - p_unit)) - struct_logit
-
-
-def counterfactual_prob_pct(
-    struct_logit_cf: np.ndarray,
-    pam_gate_cf: np.ndarray,
-    U: np.ndarray,
-    pam_mode: str = "additive",
-) -> np.ndarray:
-    """y_cf (in %) — formula dipendente da pam_mode.
-
-    additive:        y_cf = σ(struct_logit_cf + U) * 100
-                     (struct_logit_cf include già pam_logit_contrib)
-    multiplicative:  y_cf = pam_gate_cf * σ(struct_logit_cf + U) * 100
-    """
-    if pam_mode == "additive":
-        return sigmoid(struct_logit_cf + U) * 100.0
-    elif pam_mode == "multiplicative":
-        return pam_gate_cf * sigmoid(struct_logit_cf + U) * 100.0
-    else:
-        raise ValueError(f"pam_mode non riconosciuto: {pam_mode}")
-
-
-# ---------- forward batched ----------
-
-def model_forward_batched(
-    model: NeuralSCM,
-    guides: list[str],
-    targets: list[str],
-    ctx: torch.Tensor,
-    batch_size: int,
-    intervention: dict | None = None,
-) -> tuple[np.ndarray, np.ndarray]:
-    """
-    Forward batched. Restituisce (struct_logit, pam_gate).
-
-    NOTA: il significato di entrambi i valori dipende da model.pam_mode:
-      - multiplicative: struct_logit = thermo + context (+ u_term); pam_gate ∈ (0,1)
-        moltiplicativo, attività = pam_gate * σ(struct_logit + U)
-      - additive: struct_logit = thermo + context + pam_logit (+ u_term);
-        pam_gate = σ(pam_logit_contrib) diagnostico, non usato nel calcolo CF
-
-    Se `intervention` è fornito, applica `model.do(intervention)`. Per positional_mlp:
-      - intervention["pam_gate"] = <pre-sigmoid logit value, mult> o <pam_logit_contrib, additive>
-      - intervention["pos_<i>"]  = <penalty value>, i in 0..19
-    """
-    n = len(guides)
-    logits = np.empty(n, dtype=np.float32)
-    pam_gates = np.empty(n, dtype=np.float32)
-    with torch.no_grad():
-        for i in range(0, n, batch_size):
-            j = min(i + batch_size, n)
-            if intervention is None:
-                out = model(guides[i:j], targets[i:j], context_features=ctx[i:j])
-            else:
-                out = model.do(
-                    guides[i:j], targets[i:j], intervention, context_features=ctx[i:j]
-                )
-            logits[i:j] = out["logit"].squeeze(-1).cpu().numpy()
-            pam_gates[i:j] = out["pam_gate"].squeeze(-1).cpu().numpy()
-    return logits, pam_gates
+from explainability._intervention_utils import (
+    abduct_U,
+    build_offtarget_dataframe,
+    compute_gc_context_batch,
+    counterfactual_prob_pct,
+    filter_saturated_pairs,
+    load_neural_scm,
+    load_positive_dataset,
+    model_forward_batched,
+    model_pred_pct,
+    resolve_on_target_mode,
+    sigmoid,
+)
 
 
 # ---------- interventi a livello sequenza ----------
@@ -199,6 +71,43 @@ def force_seed_block(guide: str) -> str:
     return guide[:8] + "AAAATTTT" + guide[16:]
 
 
+# ---------- assay-shift resolution ----------
+
+def resolve_assay_shift(
+    assay_shift_value: float | None,
+    assay_shift_from: Path | None,
+) -> tuple[float, str]:
+    """Risolve il valore di `b̂` da CLI argument o file JSON.
+
+    Restituisce (shift_value, source_label) dove source_label è un identificatore
+    leggibile (es. "explicit=-2.61", "file=N=5_median").
+    """
+    if assay_shift_value is not None and assay_shift_from is not None:
+        raise ValueError("Specificare solo uno tra --assay-shift e --assay-shift-from")
+
+    if assay_shift_value is not None:
+        return float(assay_shift_value), f"explicit={assay_shift_value:+.3f}"
+
+    if assay_shift_from is not None:
+        with open(assay_shift_from, "r") as f:
+            payload = json.load(f)
+        # Convention: il JSON contiene una chiave "selected_shift" con il valore preferito
+        # (es. il median bootstrap di un N_calib scelto). Vedi calibrate_assay_shift.py.
+        if "selected_shift" in payload:
+            shift = float(payload["selected_shift"])
+            return shift, f"file={assay_shift_from.name}"
+        # Fallback: prendi il median bootstrap del N_calib più piccolo disponibile
+        sweep = payload.get("sweep", [])
+        if not sweep:
+            raise ValueError(f"Nessun campo 'selected_shift' o 'sweep' in {assay_shift_from}")
+        # Prende il primo entry
+        entry = sweep[0]
+        shift = float(entry["b_shift"]["median"])
+        return shift, f"file={assay_shift_from.name}(N={entry['n_calib']})"
+
+    return 0.0, "none"
+
+
 # ---------- pipeline ----------
 
 def main():
@@ -207,111 +116,64 @@ def main():
     parser.add_argument(
         "--model_path",
         default="experiments/results/Exp18_Positional_AdditivePAM/neural_scm.pt",
-        help="Default: Exp18_Positional_AdditivePAM (additive mode, current best model).",
     )
-    parser.add_argument(
-        "--pam-mode",
-        choices=["additive", "multiplicative"],
-        default="additive",
-        help="Modalità PAM del modello caricato. Default 'additive' per Exp18+.",
-    )
+    parser.add_argument("--pam-mode", choices=["additive", "multiplicative"], default="additive")
     parser.add_argument("--output_dir", default="explainability/batch_results")
     parser.add_argument("--batch_size", type=int, default=512)
     parser.add_argument(
         "--on-target-mode",
         choices=["drop", "per_run", "global_max"],
         default=None,
-        help="Come gestire l'abduzione on-target. Default: per_run per guideseq, drop per changeseq",
+        help="Default: per_run per guideseq, drop per changeseq",
     )
+    parser.add_argument(
+        "--filter-saturated",
+        action="store_true",
+        help="Rimuove coppie saturated (off_reads >= on_reads). Utile per Analysis A "
+             "post Exp20 (testa F23 sul regime operativo del modello).",
+    )
+
+    # Assay shift (P1 calibration)
+    group_shift = parser.add_mutually_exclusive_group()
+    group_shift.add_argument(
+        "--assay-shift", type=float, default=None,
+        help="Offset additivo del logit (P1 calibration). Es. -2.6 per ricalibrare CHANGE-seq → GUIDE-seq.",
+    )
+    group_shift.add_argument(
+        "--assay-shift-from", type=Path, default=None,
+        help="Path al JSON prodotto da calibrate_assay_shift.py. Usa il campo 'selected_shift'.",
+    )
+
     args = parser.parse_args()
 
-    if args.on_target_mode is None:
-        args.on_target_mode = "per_run" if args.dataset == "guideseq" else "drop"
-    print(f"PAM mode:        {args.pam_mode}")
-    print(f"On-target mode:  {args.on_target_mode}")
-    print(f"Model:           {args.model_path}")
+    args.on_target_mode = resolve_on_target_mode(args.on_target_mode, args.dataset)
+    assay_shift, shift_source = resolve_assay_shift(args.assay_shift, args.assay_shift_from)
 
-    if args.dataset == "changeseq":
-        csv_path = "data/raw/changeseq/CHANGEseq_positive.csv"
-        reads_col = "CHANGEseq_reads"
-    else:
-        csv_path = "data/raw/guideseq/GUIDEseq_positive.csv"
-        reads_col = "GUIDEseq_reads"
+    print(f"PAM mode:         {args.pam_mode}")
+    print(f"On-target mode:   {args.on_target_mode}")
+    print(f"Model:            {args.model_path}")
+    print(f"Assay shift:      {assay_shift:+.4f}  (source: {shift_source})")
+    print(f"Filter saturated: {args.filter_saturated}")
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # 1. Modello
+    model, device, context_dim = load_neural_scm(args.model_path, pam_mode=args.pam_mode)
     print(f"Device: {device}")
-
-    # 1. Caricamento modello (context_dim ricavato dal checkpoint)
-    state_dict = torch.load(args.model_path, map_location=device)
-    context_dim = 0
-    if "context_net.0.weight" in state_dict:
-        context_dim = state_dict["context_net.0.weight"].shape[1]
-
-    encoder = BiologicalMismatchEncoder()
-    model = NeuralSCM(
-        encoder=encoder,
-        architecture="positional_mlp",
-        hidden_dim=8,
-        context_dim=context_dim,
-        pam_mode=args.pam_mode,
-    )
-    model.load_state_dict(state_dict)
-    model.to(device).eval()
     print(f"Modello caricato (context_dim={context_dim}, pam_mode={args.pam_mode})")
 
-    # 2. Dataset
-    df = pd.read_csv(csv_path)
-    print(f"Caricate {len(df)} righe da {csv_path}")
+    # 2-5. Dataset
+    df, reads_col = load_positive_dataset(args.dataset)
+    print(f"Caricate {len(df)} righe dal dataset {args.dataset}")
+    off_df = build_offtarget_dataframe(df, reads_col, on_target_mode=args.on_target_mode)
 
-    # 3. Lookup on-target per name (riga distance=0 con max reads)
-    on_rows = df[df["distance"] == 0].copy()
-    on_lookup = (
-        on_rows.sort_values(reads_col, ascending=False)
-        .drop_duplicates("name")
-        .set_index("name")[["offtarget_sequence", reads_col]]
-        .rename(columns={"offtarget_sequence": "on_target_seq", reads_col: "on_reads"})
-    )
-    print(f"Guide con on-target di riferimento: {len(on_lookup)}")
-
-    # 4. Off-target rows
-    off_df = df[df["distance"] > 0].copy().join(on_lookup, on="name", how="inner")
-    off_df["sgRNA"] = off_df["target"].str[:20]
-    off_df["off_target"] = off_df["offtarget_sequence"]
-    off_df["off_reads"] = off_df[reads_col]
-
-    valid = (off_df["sgRNA"].str.len() == 20) & (off_df["off_target"].str.len() == 23) & (
-        off_df["on_target_seq"].str.len() == 23
-    )
-    dropped = (~valid).sum()
-    if dropped:
-        print(f"[WARN] Scartate {dropped} righe per lunghezze incompatibili")
-    off_df = off_df[valid].reset_index(drop=True)
-    print(f"Coppie analizzabili: {len(off_df)}")
-
-    # 5a. Probabilità osservate off-target (denominatore = on-target reads della stessa guida)
-    off_df["y_obs_off_prob"] = reads_to_prob(off_df["off_reads"].values, off_df["on_reads"].values)
-
-    # 5b. Probabilità osservate on-target — dipende dalla modalità
-    if args.on_target_mode == "drop":
-        off_df["y_obs_on_prob"] = np.nan
-    elif args.on_target_mode == "per_run":
-        if "run" not in off_df.columns:
-            raise ValueError(
-                f"Dataset {args.dataset} non ha colonna 'run', usa --on-target-mode drop o global_max"
-            )
-        run_max = df.groupby("run")[reads_col].max().to_dict()
-        off_df["run_max_reads"] = off_df["run"].map(run_max).astype(np.float64)
-        off_df["y_obs_on_prob"] = reads_to_prob(off_df["on_reads"].values, off_df["run_max_reads"].values)
-        print(f"Run-level max reads: {run_max}")
-    elif args.on_target_mode == "global_max":
-        global_max = float(df[reads_col].max())
-        off_df["y_obs_on_prob"] = reads_to_prob(
-            off_df["on_reads"].values, np.full(len(off_df), global_max)
-        )
-        print(f"Global max reads: {global_max:.0f}")
+    # 5b. Optional filter: rimuovi coppie saturated (off_reads >= on_reads)
+    # Coerente con il filtro applicato in training (vedi F23 in findings.md).
+    if args.filter_saturated:
+        off_df, _ = filter_saturated_pairs(off_df, verbose=True)
+        if len(off_df) == 0:
+            raise RuntimeError("No pairs left after --filter-saturated. Aborting.")
 
     # 6. Costruzione sequenze post-intervento (sequence-level)
     off_df["sgRNA_truncated"] = off_df["sgRNA"].apply(truncate_5p)
@@ -329,61 +191,44 @@ def main():
     off_targets = off_df["off_target"].tolist()
     on_targets = off_df["on_target_seq"].tolist()
 
-    # Helper locale per ridurre boilerplate
     def fwd_pair(guides: list[str], intervention: dict | None = None):
-        """Forward su (guides, off_targets) e (guides, on_targets). Restituisce
-        ((logit_off, pam_off), (logit_on, pam_on))."""
+        """Forward su (guides, off_targets) e (guides, on_targets)."""
         ctx_off = compute_gc_context_batch(guides, off_targets, device)
         ctx_on = compute_gc_context_batch(guides, on_targets, device)
         l_off, p_off = model_forward_batched(model, guides, off_targets, ctx_off, args.batch_size, intervention=intervention)
         l_on, p_on = model_forward_batched(model, guides, on_targets, ctx_on, args.batch_size, intervention=intervention)
         return (l_off, p_off), (l_on, p_on)
 
-    # 7a. Forward factual
+    # 7a-e. Forward
     print("Forward factual...")
     (logit_off_f, pam_off_f), (logit_on_f, pam_on_f) = fwd_pair(guides_wt)
-
-    # 7b. Sequence intervention: truncation 5'
     print("Forward truncation 5' (sequence intervention)...")
     (logit_off_t, pam_off_t), (logit_on_t, pam_on_t) = fwd_pair(guides_tru)
-
-    # 7c. DAG node intervention: do(pos_14 = 0.0)
     print("Forward do(pos_14 = 0.0) (DAG node intervention)...")
     (logit_off_p14, pam_off_p14), (logit_on_p14, pam_on_p14) = fwd_pair(guides_wt, intervention={"pos_14": 0.0})
-
-    # 7d. Diversity intervention (Treatment ACGT / Control AAAA in pos 16-19)
     print("Forward diversity ACGT (T) e AAAA (C) in pos 16-19 (sequence intervention)...")
     (logit_off_divT, pam_off_divT), (logit_on_divT, pam_on_divT) = fwd_pair(guides_divT)
     (logit_off_divC, pam_off_divC), (logit_on_divC, pam_on_divC) = fwd_pair(guides_divC)
-
-    # 7e. Repeat intervention (Treatment ATATATAT / Control AAAATTTT in pos 8-15)
     print("Forward repeat ATATATAT (T) e AAAATTTT (C) in pos 8-15 (sequence intervention)...")
     (logit_off_repT, pam_off_repT), (logit_on_repT, pam_on_repT) = fwd_pair(guides_repT)
     (logit_off_repC, pam_off_repC), (logit_on_repC, pam_on_repC) = fwd_pair(guides_repC)
 
-    # 8. Predizioni factual — coerenti col modello in base alla modalità
+    # 8. Predizioni factual — coerenti col modello in base alla modalità + shift
     off_df["pam_off_f"] = pam_off_f
     off_df["pam_on_f"] = pam_on_f
-    if args.pam_mode == "additive":
-        # In additive: activity = σ(logit). pam_gate è solo diagnostico.
-        off_df["y_pred_off_prob"] = sigmoid(logit_off_f) * 100.0
-        off_df["y_pred_on_prob"] = sigmoid(logit_on_f) * 100.0
-    else:
-        # In multiplicative: activity = pam_gate × σ(logit)
-        off_df["y_pred_off_prob"] = pam_off_f * sigmoid(logit_off_f) * 100.0
-        off_df["y_pred_on_prob"] = pam_on_f * sigmoid(logit_on_f) * 100.0
+    off_df["y_pred_off_prob"] = model_pred_pct(logit_off_f, pam_off_f, args.pam_mode, assay_shift)
+    off_df["y_pred_on_prob"] = model_pred_pct(logit_on_f, pam_on_f, args.pam_mode, assay_shift)
 
-    # 9. Abduzione off-target (mode-aware)
+    # 9. Abduzione off-target (mode-aware + shift)
     off_df["U_off"] = abduct_U(
         np.asarray(off_df["y_obs_off_prob"].values),
-        logit_off_f,
-        pam_off_f,
-        pam_mode=args.pam_mode,
+        logit_off_f, pam_off_f,
+        pam_mode=args.pam_mode, assay_shift=assay_shift,
     )
     U_off_arr = np.asarray(off_df["U_off"].values)
 
-    # 10. Controfattuali off-target (mode-aware)
-    cf = lambda l, p: counterfactual_prob_pct(l, p, U_off_arr, pam_mode=args.pam_mode)
+    # 10. Controfattuali off-target (con shift applicato a struct_logit_cf)
+    cf = lambda l, p: counterfactual_prob_pct(l, p, U_off_arr, pam_mode=args.pam_mode, assay_shift=assay_shift)
     off_df["y_cf_off_tru_prob"] = cf(logit_off_t, pam_off_t)
     off_df["y_cf_off_p14_prob"] = cf(logit_off_p14, pam_off_p14)
     off_df["y_cf_off_divT_prob"] = cf(logit_off_divT, pam_off_divT)
@@ -400,33 +245,27 @@ def main():
     off_df["delta_off_divTC"] = off_df["y_cf_off_divT_prob"] - off_df["y_cf_off_divC_prob"]
     off_df["delta_off_repTC"] = off_df["y_cf_off_repT_prob"] - off_df["y_cf_off_repC_prob"]
 
-    # 11. On-target: due regimi distinti
-    def model_pred_pct(logit, pam):
-        """Predizione del modello in % (mode-aware)."""
-        if args.pam_mode == "additive":
-            return sigmoid(logit) * 100.0
-        return pam * sigmoid(logit) * 100.0
+    # 11. On-target: due regimi
+    def model_pred(l, p):
+        return model_pred_pct(l, p, args.pam_mode, assay_shift)
 
     if args.on_target_mode == "drop":
-        # Nessuna abduzione on-target. Baseline = y_pred_on. CF = pure model output.
         off_df["U_on"] = np.nan
-        off_df["y_cf_on_tru_prob"] = model_pred_pct(logit_on_t, pam_on_t)
-        off_df["y_cf_on_p14_prob"] = model_pred_pct(logit_on_p14, pam_on_p14)
-        off_df["y_cf_on_divT_prob"] = model_pred_pct(logit_on_divT, pam_on_divT)
-        off_df["y_cf_on_divC_prob"] = model_pred_pct(logit_on_divC, pam_on_divC)
-        off_df["y_cf_on_repT_prob"] = model_pred_pct(logit_on_repT, pam_on_repT)
-        off_df["y_cf_on_repC_prob"] = model_pred_pct(logit_on_repC, pam_on_repC)
+        off_df["y_cf_on_tru_prob"] = model_pred(logit_on_t, pam_on_t)
+        off_df["y_cf_on_p14_prob"] = model_pred(logit_on_p14, pam_on_p14)
+        off_df["y_cf_on_divT_prob"] = model_pred(logit_on_divT, pam_on_divT)
+        off_df["y_cf_on_divC_prob"] = model_pred(logit_on_divC, pam_on_divC)
+        off_df["y_cf_on_repT_prob"] = model_pred(logit_on_repT, pam_on_repT)
+        off_df["y_cf_on_repC_prob"] = model_pred(logit_on_repC, pam_on_repC)
         baseline_on = off_df["y_pred_on_prob"]
     else:
-        # Abduzione classica (mode-aware) sull'on-target
         off_df["U_on"] = abduct_U(
             np.asarray(off_df["y_obs_on_prob"].values),
-            logit_on_f,
-            pam_on_f,
-            pam_mode=args.pam_mode,
+            logit_on_f, pam_on_f,
+            pam_mode=args.pam_mode, assay_shift=assay_shift,
         )
         U_on_arr = np.asarray(off_df["U_on"].values)
-        cf_on = lambda l, p: counterfactual_prob_pct(l, p, U_on_arr, pam_mode=args.pam_mode)
+        cf_on = lambda l, p: counterfactual_prob_pct(l, p, U_on_arr, pam_mode=args.pam_mode, assay_shift=assay_shift)
         off_df["y_cf_on_tru_prob"] = cf_on(logit_on_t, pam_on_t)
         off_df["y_cf_on_p14_prob"] = cf_on(logit_on_p14, pam_on_p14)
         off_df["y_cf_on_divT_prob"] = cf_on(logit_on_divT, pam_on_divT)
@@ -444,32 +283,36 @@ def main():
     off_df["delta_on_divTC"] = off_df["y_cf_on_divT_prob"] - off_df["y_cf_on_divC_prob"]
     off_df["delta_on_repTC"] = off_df["y_cf_on_repT_prob"] - off_df["y_cf_on_repC_prob"]
 
-    # 12. Salvataggio CSV (sottoinsieme leggibile delle colonne)
+    # 12. Salvataggio CSV
     keep_cols = [
         "name", "sgRNA", "off_target", "on_target_seq", "distance",
         "off_reads", "on_reads",
         "pam_off_f", "pam_on_f",
         "y_obs_off_prob", "y_pred_off_prob", "U_off",
         "y_obs_on_prob", "y_pred_on_prob", "U_on",
-        # Single-condition (vs baseline)
         "y_cf_off_tru_prob", "y_cf_on_tru_prob", "delta_off_tru", "delta_on_tru",
         "y_cf_off_p14_prob", "y_cf_on_p14_prob", "delta_off_p14", "delta_on_p14",
-        # Diversity (T-C contrast)
         "y_cf_off_divT_prob", "y_cf_off_divC_prob",
         "y_cf_on_divT_prob", "y_cf_on_divC_prob",
         "delta_off_divT", "delta_off_divC", "delta_off_divTC",
         "delta_on_divT", "delta_on_divC", "delta_on_divTC",
-        # Repeat (T-C contrast)
         "y_cf_off_repT_prob", "y_cf_off_repC_prob",
         "y_cf_on_repT_prob", "y_cf_on_repC_prob",
         "delta_off_repT", "delta_off_repC", "delta_off_repTC",
         "delta_on_repT", "delta_on_repC", "delta_on_repTC",
     ]
-    out_csv = output_dir / f"{args.dataset}_batch_results.csv"
+    # Suffisso al filename: include shift e filtro saturated per evitare sovrascritture
+    suffix_parts = []
+    if assay_shift != 0.0:
+        suffix_parts.append(f"shift{assay_shift:+.2f}")
+    if args.filter_saturated:
+        suffix_parts.append("filtsat")
+    suffix = ("_" + "_".join(suffix_parts)) if suffix_parts else ""
+    out_csv = output_dir / f"{args.dataset}_batch_results{suffix}.csv"
     off_df[keep_cols].to_csv(out_csv, index=False)
     print(f"\nSalvato {out_csv}")
 
-    # 13. Plot Pareto trade-off — 4 interventi
+    # 13. Plot Pareto
     sns.set_theme(style="whitegrid")
     fig, ax = plt.subplots(figsize=(11, 7))
     ax.scatter(off_df["delta_on_tru"], off_df["delta_off_tru"],
@@ -484,16 +327,17 @@ def main():
     ax.axvline(0, color="gray", linewidth=0.8)
     ax.set_xlabel("Delta On-Target Probability (cf - baseline) [%]")
     ax.set_ylabel("Delta Off-Target Probability (cf - baseline) [%]")
-    ax.set_title(f"Pareto Trade-Off Causale ({args.dataset}, pam_mode={args.pam_mode})\n"
+    title_extra = f", b̂={assay_shift:+.3f}" if assay_shift != 0.0 else ""
+    ax.set_title(f"Pareto Trade-Off Causale ({args.dataset}, pam_mode={args.pam_mode}{title_extra})\n"
                  f"Quadrante in basso-a-destra = ideale (off↓, on↑)")
     ax.legend(loc="upper left", fontsize=9)
     plt.tight_layout()
-    pareto_path = output_dir / f"{args.dataset}_pareto.png"
+    pareto_path = output_dir / f"{args.dataset}_pareto{suffix}.png"
     plt.savefig(pareto_path, dpi=200)
     plt.close()
     print(f"Salvato {pareto_path}")
 
-    # 14. Plot distribuzione del rumore U
+    # 14. Plot distribuzione U
     has_u_on = args.on_target_mode != "drop"
     n_panels = 2 if has_u_on else 1
     fig, axes = plt.subplots(1, n_panels, figsize=(7 * n_panels, 5), squeeze=False)
@@ -511,14 +355,15 @@ def main():
         ax.set_title(title)
         ax.legend()
     plt.tight_layout()
-    u_path = output_dir / f"{args.dataset}_U_distribution.png"
+    u_path = output_dir / f"{args.dataset}_U_distribution{suffix}.png"
     plt.savefig(u_path, dpi=200)
     plt.close()
     print(f"Salvato {u_path}")
 
-    # 15. Sommario su stdout — aggregato globale (per coppia)
+    # 15. Sommario globale
     print("\n=== SOMMARIO GLOBALE (per coppia) ===")
     print(f"PAM mode:          {args.pam_mode}")
+    print(f"Assay shift b̂:     {assay_shift:+.4f}  (source: {shift_source})")
     print(f"Coppie analizzate: {len(off_df)}")
     print(f"Guide uniche:      {off_df['name'].nunique()}")
     print(f"\npam_off  mean={off_df['pam_off_f'].mean():.3f}  std={off_df['pam_off_f'].std():.3f}")
@@ -530,20 +375,6 @@ def main():
               f"median={off_df['U_on'].median():+.3f}")
     else:
         print("U_on   N/A (on-target mode = drop, nessuna abduzione)")
-
-    # Diagnostica saturazione (per modalità multiplicative; in additive non dovrebbe accadere)
-    if args.pam_mode == "multiplicative":
-        sat_off = (off_df["y_obs_off_prob"] / 100.0 >= off_df["pam_off_f"]).sum()
-        if has_u_on:
-            sat_on = (off_df["y_obs_on_prob"] / 100.0 >= off_df["pam_on_f"]).sum()
-        else:
-            sat_on = 0
-        print(f"\n[diagnostica multiplicative] coppie con y_obs ≥ pam_gate (clipping attivo):")
-        print(f"  off-target: {sat_off}/{len(off_df)} ({100*sat_off/len(off_df):.1f}%)")
-        if has_u_on:
-            print(f"  on-target:  {sat_on}/{len(off_df)} ({100*sat_on/len(off_df):.1f}%)")
-    else:
-        print(f"\n[diagnostica additive] nessuna saturazione possibile per costruzione (no clipping artifact).")
 
     interventions_summary = [
         ("Truncation 5' (sequence)", "delta_off_tru", "delta_on_tru"),
@@ -558,7 +389,6 @@ def main():
         ideal = ((off_df[dcoff] < 0) & (off_df[dcon] >= -5)).sum()
         print(f"  Coppie nel quadrante ideale (Deltaoff<0 e Deltaon>=-5%): {ideal} ({100*ideal/len(off_df):.1f}%)")
 
-    # Diagnostica supplementare: T e C separatamente per diversity e repeat
     print("\n--- Diagnostica T vs C per interventi diversity/repeat (per coppia) ---")
     for prefix, label in [("div", "Diversity"), ("rep", "Repeat")]:
         for side in ("off", "on"):
@@ -569,7 +399,7 @@ def main():
                   f"delta_C mean={off_df[C_col].mean():+.2f}%  "
                   f"contrast(T-C) mean={(off_df[T_col]-off_df[C_col]).mean():+.2f}%")
 
-    # 16. Sommario per-guida: mediana entro guida, poi statistiche su quei valori
+    # 16. Per-guida
     delta_cols = [
         "delta_off_tru", "delta_off_p14", "delta_off_divTC", "delta_off_repTC",
         "delta_on_tru", "delta_on_p14", "delta_on_divTC", "delta_on_repTC",
@@ -578,7 +408,6 @@ def main():
     per_guide = off_df.groupby("name")[delta_cols + u_cols].median()
 
     print(f"\n=== SOMMARIO PER-GUIDA (mediana entro guida -> distribuzione su {len(per_guide)} guide) ===")
-    print("(mitiga il bias delle guide con molti off-target nella media globale)")
     print()
     summary = per_guide.describe().loc[["mean", "std", "min", "25%", "50%", "75%", "max"]].round(3)
     print(summary.to_string())
@@ -589,7 +418,7 @@ def main():
         print(f"{label}: guide nel quadrante ideale (mediana Deltaoff<0 e Deltaon>=-5%): "
               f"{ideal_g}/{n_g} ({100*ideal_g/n_g:.1f}%)")
 
-    per_guide_path = output_dir / f"{args.dataset}_per_guide_medians.csv"
+    per_guide_path = output_dir / f"{args.dataset}_per_guide_medians{suffix}.csv"
     per_guide.to_csv(per_guide_path)
     print(f"\nSalvato {per_guide_path}")
 
