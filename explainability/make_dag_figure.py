@@ -36,17 +36,26 @@ from matplotlib.patches import FancyArrowPatch, FancyBboxPatch
 OUT = Path("explainability/plots/thesis_fig0_dag.png")
 
 # --- visual palette ----------------------------------------------------
-COLOR_INPUT   = "#bcd6ec"   # light blue   - observed inputs (sgRNA, PAM)
-COLOR_LATENT  = "#ffd9a8"   # light orange - latent biological constructs (P_i, g_pam)
-COLOR_EXOG    = "#e8e0f0"   # light purple - exogenous noise U (dashed border)
-COLOR_LOGIT   = "#d7e6c9"   # light green  - structural logit (combiner)
-COLOR_OUTCOME = "#f5a8a8"   # light red    - measured outcome Y
+# Coherent with the PhD interview slide deck (phd-interview/slides/phd-interview):
+#   bg #faf8f4 (warm paper), text #0d1117, accent #1c4fa3 (royal academic blue),
+#   muted #5a6470, card #f1ede4, paper #fdfcf8.
+# Node fills are kept distinguishable but pulled into a warmer, more
+# desaturated family aligned with the deck.
+BG_FACE       = "#faf8f4"   # figure & axes background (matches slide bg)
+TEXT_PRIMARY  = "#0d1117"   # primary text color
+TEXT_MUTED    = "#5a6470"   # muted text
 
-COLOR_EDGE_F  = "#555555"   # gray         - structural assignment (phi, psi, sigma)
-COLOR_EDGE_W  = "#0b5e2b"   # dark green   - weighted edges (w_pos,i)
-COLOR_EDGE_A  = "#1f3b6e"   # dark blue    - additive contribution
-COLOR_EDGE_U  = "#7a3a99"   # purple       - exogenous noise (dashed)
-COLOR_REGION  = "#5e7da5"   # blue-gray    - regional grouping brackets
+COLOR_INPUT   = "#d0dbeb"   # cool blue-gray  - observed inputs (sgRNA, PAM)
+COLOR_LATENT  = "#ede0c3"   # warm sand       - latent biological constructs (P_i, g_pam)
+COLOR_EXOG    = "#dcd5db"   # muted lavender  - exogenous noise U (dashed border)
+COLOR_LOGIT   = "#cbd6e8"   # pale royal-blue - structural logit (combiner)
+COLOR_OUTCOME = "#e8c8b8"   # muted terracotta - measured outcome Y
+
+COLOR_EDGE_F  = "#3a4954"   # slate           - structural assignment (phi, psi, sigma)
+COLOR_EDGE_W  = "#1c4fa3"   # deck accent     - weighted edges (w_pos,i)
+COLOR_EDGE_A  = "#2960ad"   # vibrant blue    - additive contribution
+COLOR_EDGE_U  = "#6b4f7a"   # muted purple    - exogenous noise (dashed)
+COLOR_REGION  = "#5a6470"   # deck muted      - regional grouping brackets
 
 
 def box(ax, xy, text, kind, w=1.8, h=0.9, fontsize=10, dashed=False):
@@ -120,6 +129,8 @@ def region_bracket(ax, x_left, x_right, y, label, color=COLOR_REGION,
 
 def main():
     fig, ax = plt.subplots(figsize=(13, 8.5))
+    fig.patch.set_facecolor(BG_FACE)
+    ax.set_facecolor(BG_FACE)
     ax.set_xlim(-0.5, 14)
     ax.set_ylim(-1.8, 9)
     ax.set_aspect("equal")
@@ -253,14 +264,6 @@ def main():
           label_pos=0.50, style="--", curvature=-0.15, lw=1.4)
 
     # =====================================================================
-    # Title
-    # =====================================================================
-    ax.set_title(
-        "Causal DAG of Cas9 off-target cleavage\n"
-        "(structural template instantiated by the Neural SCM, Chapter 3)",
-        fontsize=13, fontweight="bold", pad=18)
-
-    # =====================================================================
     # Legend
     # =====================================================================
     legend_nodes = [
@@ -299,7 +302,7 @@ def main():
 
     plt.tight_layout()
     OUT.parent.mkdir(parents=True, exist_ok=True)
-    plt.savefig(OUT, dpi=200, bbox_inches="tight")
+    plt.savefig(OUT, dpi=200, bbox_inches="tight", facecolor=BG_FACE)
     plt.close()
     print(f"Saved {OUT}")
 
