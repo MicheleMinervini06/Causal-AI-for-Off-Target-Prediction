@@ -37,3 +37,6 @@ doc/thesis/*
 #Explainability results
 explainability/batch_results*
 explainability/calibration_results*
+
+#Slides
+phd-interview/
