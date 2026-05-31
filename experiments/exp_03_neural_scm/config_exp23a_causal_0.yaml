@@ -1,0 +1,11 @@
+_base: experiments/exp_03_neural_scm/config_exp21_clean_split.yaml
+
+experiment:
+  name: Exp23a_Causal_0
+  tags: ["lambda_causal", "phase_B", "baseline_no_causal"]
+  notes: "Fase B baseline: lambda_causal=0 (causal loss disattivata). Conferma che Exp21 con lambda_causal=0.01 era effettivamente vicino al 'no causal'."
+
+training:
+  patience: 7
+  lambda_causal: 0.0
+  lambda_consist: 0.0   # strutturalmente nullo per positional_mlp

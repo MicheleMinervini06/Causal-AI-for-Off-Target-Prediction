@@ -1,0 +1,12 @@
+_base: experiments/exp_03_neural_scm/config_exp21_clean_split.yaml
+
+experiment:
+  name: Exp22b_LR_OneCycle_Late
+  tags: ["lr_tuning", "onecycle", "phase_A"]
+  notes: "Fase A run 2: OneCycleLR ma con picco a metà training (pct_start=0.5 vs 0.15 di Exp21). Il LR sale lentamente, raggiunge il max a epoca 15, poi decay più dolce."
+
+training:
+  epochs: 30
+  patience: 7
+  lr_scheduler_type: onecycle
+  pct_start: 0.5

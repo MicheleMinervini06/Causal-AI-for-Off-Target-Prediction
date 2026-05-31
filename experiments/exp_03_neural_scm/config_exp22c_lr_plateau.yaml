@@ -1,0 +1,14 @@
+_base: experiments/exp_03_neural_scm/config_exp21_clean_split.yaml
+
+experiment:
+  name: Exp22c_LR_Plateau
+  tags: ["lr_tuning", "plateau", "phase_A"]
+  notes: "Fase A run 3: ReduceLROnPlateau su val AUPRC. Niente decay finché Val AUPRC migliora; dimezza LR dopo 3 epoche di plateau. 50 epoche per dare spazio ai tagli. Picca: questa è l'opzione che dovrebbe massimizzare il tempo speso al LR ottimale."
+
+training:
+  epochs: 50
+  patience: 10   # > plateau_patience (3), per dare a ReduceLROnPlateau ~3 cicli di taglio prima di mollare
+  lr_scheduler_type: plateau
+  plateau_factor: 0.5
+  plateau_patience: 3
+  plateau_min_lr: 1.0e-6

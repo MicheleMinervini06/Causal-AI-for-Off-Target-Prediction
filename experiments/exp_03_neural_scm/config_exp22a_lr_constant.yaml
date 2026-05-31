@@ -1,0 +1,12 @@
+_base: experiments/exp_03_neural_scm/config_exp21_clean_split.yaml
+
+experiment:
+  name: Exp22a_LR_Constant
+  tags: ["lr_tuning", "constant_lr", "phase_A"]
+  notes: "Fase A run 1: stesso setup di Exp21 ma con LR costante a 1e-4 dopo 5 epoche di warmup lineare. Niente decay → testa se il plateau di Val AUPRC a epoca 18 era dovuto al decay troppo aggressivo."
+
+training:
+  epochs: 30
+  patience: 7
+  lr_scheduler_type: constant
+  warmup_epochs: 5

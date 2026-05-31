@@ -1,0 +1,18 @@
+_base: experiments/exp_03_neural_scm/config_exp23b_causal_01.yaml
+
+experiment:
+  name: Exp24_MergedSplit_Causal_0p1
+  tags: ["lambda_causal", "merged_split", "scaling", "final_model"]
+  notes: "Exp24: best architecture (Exp23b, lambda_causal=0.1) addestrata su train+val merged (75 sgRNAs vs 39 di Exp23b). Test set originale (35 sgRNAs) usato come val per early stopping. GUIDE-seq resta unico cross-assay test. Epoche aumentate a 60 perche Exp23b stava ancora migliorando all'epoca 30."
+
+data:
+  train_split: data/processed/splits_merged/train.parquet
+  val_split:   data/processed/splits_merged/val.parquet
+  test_split:  data/processed/splits_merged/test.parquet
+  filter_saturated_changeseq: true
+
+training:
+  epochs: 60
+  patience: 10
+  lambda_causal: 0.1
+  lambda_consist: 0.0

@@ -1,0 +1,14 @@
+_base: experiments/exp_03_neural_scm/config_exp21_clean_split.yaml
+
+experiment:
+  name: Exp22d_LR_CosineRestarts
+  tags: ["lr_tuning", "cosine_restarts", "phase_A"]
+  notes: "Fase A run 4: CosineAnnealingWarmRestarts con T_0=10 epoche, T_mult=2. LR cala in coseno per 10 epoche, restart, poi cala per 20 epoche. Testa se i restart aiutano a uscire dal plateau."
+
+training:
+  epochs: 40
+  patience: 12   # >= T_0 (10), per non killare il run prima del primo restart cosine
+  lr_scheduler_type: cosine_restarts
+  cosine_T_0: 10
+  cosine_T_mult: 2
+  cosine_eta_min: 1.0e-6

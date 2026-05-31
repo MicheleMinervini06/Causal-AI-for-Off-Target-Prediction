@@ -1,0 +1,11 @@
+_base: experiments/exp_03_neural_scm/config_exp21_clean_split.yaml
+
+experiment:
+  name: Exp23b_Causal_0p1
+  tags: ["lambda_causal", "phase_B"]
+  notes: "Fase B run 2: lambda_causal=0.1 (10x Exp21). Inizia a forzare la directional margin loss a essere influente nella loss totale."
+
+training:
+  patience: 7
+  lambda_causal: 0.1
+  lambda_consist: 0.0

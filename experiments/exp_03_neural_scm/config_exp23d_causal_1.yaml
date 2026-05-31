@@ -1,0 +1,11 @@
+_base: experiments/exp_03_neural_scm/config_exp21_clean_split.yaml
+
+experiment:
+  name: Exp23d_Causal_1p0
+  tags: ["lambda_causal", "phase_B", "extreme"]
+  notes: "Fase B run 4: lambda_causal=1.0. La directional margin loss domina la loss totale. Stress test per vedere se il modello rinuncia all'accuratezza predittiva pur di rispettare la monotonia causale."
+
+training:
+  patience: 7
+  lambda_causal: 1.0
+  lambda_consist: 0.0

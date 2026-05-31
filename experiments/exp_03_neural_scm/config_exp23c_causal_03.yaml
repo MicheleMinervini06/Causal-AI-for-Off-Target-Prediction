@@ -1,0 +1,11 @@
+_base: experiments/exp_03_neural_scm/config_exp21_clean_split.yaml
+
+experiment:
+  name: Exp23c_Causal_0p3
+  tags: ["lambda_causal", "phase_B"]
+  notes: "Fase B run 3: lambda_causal=0.3. La directional margin loss diventa una componente comparabile al focal loss in magnitudine."
+
+training:
+  patience: 7
+  lambda_causal: 0.3
+  lambda_consist: 0.0
