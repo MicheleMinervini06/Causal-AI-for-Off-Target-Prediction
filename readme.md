@@ -1,73 +1,87 @@
 # crispr-explainability
 
-CRISPR off-target prediction with a neural Structural Causal Model (SCM).
-The goal is not just predictive performance: the model is structured to
-**isolate the thermodynamic mechanism** (PAM gate + positional penalties along
-the spacer) and to support **counterfactual reasoning** (`do(...)`) over
-interventions on the guide and on the off-target.
+A **Neural Structural Causal Model (SCM)** for CRISPR/Cas9 off-target prediction.
 
-Work is organized in four phases, tracked in [`doc/findings.md`](doc/findings.md).
+The goal is not raw predictive performance but **identification**: the architecture is
+built to *isolate the invariant cleavage mechanism* `f(X)` (PAM recognition + positional
+mismatch penalties along the spacer) from the *exogenous, assay-specific noise* `U`, so
+that the model
+
+- **transports across assays** — train *in vitro* on CHANGE-seq, predict *in vivo* on
+  GUIDE-seq, with the distribution shift absorbed by a single per-environment offset
+  `b(E)` (Sparse Mechanism Shift);
+- supports **counterfactual reasoning** — `do(·)` interventions on the guide, the
+  off-target, or individual DAG nodes, via algebraic abduction → action → prediction.
+
+This repository accompanies the MSc thesis (`doc/thesis/`) and its defense slides
+(`phd-interview/slides/laurea/`). Research is logged finding-by-finding (F1–F27) in
+[`doc/findings.md`](doc/findings.md).
 
 ---
 
-## Current state (Phase 4)
+## Headline results
 
-- **Active model**: `experiments/results/Exp15_Positional_ExtendedOneCycle/`
-  — `positional_mlp` architecture with a GC context head (`context_dim=3`),
-  trained on CHANGEseq positives + negatives, evaluated cross-assay on GUIDEseq.
-- **Batch counterfactual pipeline**: `explainability/simulate_intervention_batch.py`
-  runs abduction + intervention + prediction over 67k CHANGEseq pairs and 1.6k
-  GUIDEseq pairs, producing Pareto trade-off plots and noise distributions.
-- **Key findings**:
-  - F1 — cross-assay calibration bias (AUPRC CHANGEseq → GUIDEseq −57%).
-  - F7 — deep complexity hurts generalization; the linear bypass with hard
-    priors is preferable.
-  - F8 — `y_obs_on=99%` saturation made on-target abduction degenerate.
-    Fix: `--on-target-mode {drop, per_run}`.
-  - F9 — the `U_off` gap between CHANGEseq (in vitro, mean +2.34) and GUIDEseq
-    (in vivo, mean −0.14) is a scale mismatch between cell-free and cellular
-    regimes, not a model error.
-  - F10 — fixed interventions (5' truncation, pos15→A mutation) do not pass the
-    Pareto test on either dataset; a guide-specific rescue mutation is needed.
+Adopted model: **`Exp30`** — a `positional_mlp` Neural SCM (≈700 parameters; hard
+monotonicity prior `w_pos ≤ 0`, additive PAM gate, 12-dim biological-mismatch encoding,
+GC context head, causal-margin weight `λ_causal = 0.1`). Trained on CHANGE-seq and
+evaluated cross-assay on GUIDE-seq under **per-sgRNA-disjoint** splits.
 
-Numerical details and tables in [`doc/findings.md`](doc/findings.md).
+| Model | CHANGE-seq AUPRC | GUIDE-seq AUPRC | Counterfactual? |
+|---|---:|---:|:--:|
+| XGBoost (DAG features) | 0.290 | 0.265 | no |
+| CatBoost (DAG features) | 0.394 | 0.329 | no |
+| CCLMoff (99 M-param foundation model) | 0.014 | 0.159 | no |
+| **Neural SCM (this work, ≈700 params)** | **0.401** | **0.377** | **yes** |
+
+- Statistically tied with the strongest baseline (CatBoost) in-distribution (p = 0.16);
+  **+0.048 AUPRC cross-assay** (p < 0.001), DeLong / paired-bootstrap on the matched rows.
+- **Causal Consistency Score (CCS)** = 1.00 on the adopted model, and graded 0.40–1.00
+  across 11 falsification variants — an evaluation axis the discriminative baselines
+  cannot access (no `do(·)` interface).
+
+Full tables and analysis in `doc/thesis/4_results.tex`; the Phase-9 synthesis is at the
+end of `doc/findings.md`.
 
 ---
 
 ## Repository structure
 
 ```
-dag/                       DAG-based feature engineering (mismatch, PAM,
-                           energetics, independence tests, parametric SCM)
+dag/                         DAG feature engineering (mismatch, PAM, energetics,
+                             independence tests, parametric SCM)
 models/
-  baseline/                XGBoost + CatBoost with DAG features
+  baseline/                  XGBoost + CatBoost on DAG features
   deep/
-    encoding.py            BiologicalMismatchEncoder, PairwiseTokenEncoder,
-                           ContextAwareMismatchEncoder
-    modules.py             PAMModule, SpacerRegionModule, MismatchVectorModule,
-                           TypedMismatchModule
-    neural_scm.py          NeuralSCM (8 architectures: positional_mlp, deep_scm,
-                           mini_mlp, typed_mlp, learned_mlp, context_aware_mlp,
-                           linear_bypass, …)
-    train.py               training loop with Focal Loss, OneCycleLR, IRM
-evaluation/                unified interface (predict_proba, explain)
+    encoding.py              BiologicalMismatch / Pairwise / ContextAware encoders
+    modules.py               PAM, spacer-region, mismatch-vector, typed modules
+    neural_scm.py            NeuralSCM (positional_mlp adopted; + typed/linear/…)
+    train.py                 Focal loss, OneCycleLR, causal-margin regulariser
+  utils/
+    variational_diagnostics.py   β-VAE abduction diagnostics (the failed alternative)
+evaluation/
+  ccs.py                     Causal Consistency Score (five do(·) rules)
+  metrics.py                 AUROC / AUPRC + bootstrap CIs
+  benchmark.py               cross-experiment comparison
 explainability/
-  benchmark_models.py      AUROC/AUPRC comparison across variants
-  explain_thermodynamics.py  positional profile (W_i * s_i) per mismatch chemistry
-  simulate_intervention.py       single-pair counterfactual
-  simulate_intervention_batch.py batch counterfactual CSV + Pareto + U-dist
-  ig.py / shap_utils.py / attention.py  attribution methods
+  explain_thermodynamics.py        positional penalty profile |w_i · φ(type)|
+  simulate_intervention.py         single-pair counterfactual
+  simulate_intervention_batch.py   population counterfactual + Pareto + U-dist
+  run_counterfactual_thesis.py     thesis counterfactual battery → thesis_results/
+  characterize_saturated_pairs.py  saturation diagnostic (U bimodality)
+  make_*_figure*.py, thesis_plots.py   thesis / defense figures
 experiments/
-  exp_01_baseline/         XGBoost + CatBoost
-  exp_02_scm/              parametric SCM + independence tests
-  exp_03_neural_scm/       Neural SCM (run.py + config.yaml)
-  results/                 output of all experiments (Exp03 → Exp15)
+  exp_01_baseline/           XGBoost + CatBoost
+  exp_02_scm/                parametric SCM + independence tests
+  exp_03_neural_scm/         Neural SCM (run.py + config_exp18…30.yaml)
+  results/                   per-run output (Exp24 merged split … Exp30 adopted,
+                             cclmoff/ baseline, ccs_falsifiability.json)
 doc/
-  findings.md              finding tracker (F1–F11)
-  phase_1.md / phase_2.md / plan.md / project_report.md
-data/
-  raw/{changeseq,guideseq}/    positive + negative datasets
-  processed/                   feature engineering outputs
+  findings.md                research journal (F1–F27, Phases 1–9)
+  thesis/                    LaTeX thesis (0_abstract … 5_conclusions, refs.bib)
+  *_presentation.md, metrics.md, plan.md, project_report.md
+phd-interview/               open-slide React deck — defense presentation (slides/laurea)
+data/                        raw / processed / logs   (local, git-ignored)
+tests/                       pytest suite + CCS / statistical-comparison scripts
 ```
 
 ---
@@ -84,19 +98,22 @@ uv sync --extra dev
 copy .env.example .env   # then fill in DATA_DIR, RESULTS_DIR, WANDB_KEY
 ```
 
-Torch is installed from the CUDA 13.0 index (see `pyproject.toml`); for CPU-only
-builds edit the `[tool.uv.sources]` section.
+Torch is installed from the CUDA 13.0 index (see `pyproject.toml`); for CPU-only builds
+edit the `[tool.uv.sources]` section.
+
+> **Data** lives under `data/` (raw / processed / logs) and is **not versioned** — point
+> `DATA_DIR` at your local copy.
 
 ---
 
 ## Workflow
 
-### Training (baseline + Neural SCM)
+### Train & benchmark
 
 ```powershell
-make data           # extracts DAG features into data/processed/features/
-make train          # crispr-exp01 (baseline) + exp02 (SCM) + exp03 (Neural SCM)
-make eval           # cross-experiment benchmark in experiments/results/
+make data    # DAG features → data/processed/features/
+make train   # crispr-exp01 (baseline) + exp02 (SCM) + exp03 (Neural SCM)
+make eval    # cross-experiment benchmark in experiments/results/
 ```
 
 Without `make`:
@@ -109,55 +126,45 @@ uv run crispr-exp03
 uv run crispr-benchmark --results-dir experiments/results --output experiments/results/benchmark_metrics.csv
 ```
 
-To train a specific Neural SCM variant, edit
-`experiments/exp_03_neural_scm/config.yaml` (`architecture` field) and re-run
-`crispr-exp03`. The checkpoint lands in `experiments/results/<run_name>/`.
+To train a specific Neural SCM variant, select a config under
+`experiments/exp_03_neural_scm/` (`config.yaml` is the default; the ablation grid is
+`config_exp18…30_*.yaml`, with **Exp30** the adopted model — each config inherits from a
+parent via `_base:`). Checkpoints land in `experiments/results/<run_name>/`.
 
 ### Counterfactual analysis
 
-**Single-pair** (sanity check on a known example):
-
 ```powershell
+# Thesis battery: regional healing hierarchy, node-level do(P_k = 0), PAM canonization
+#   → explainability/thesis_results/
+uv run python explainability/run_counterfactual_thesis.py
+
+# Population batch: (Δon, Δoff) Pareto + inferred-noise distributions
+#   → explainability/batch_results/
+uv run python explainability/simulate_intervention_batch.py --dataset guideseq
+uv run python explainability/simulate_intervention_batch.py --dataset changeseq
+
+# Single-pair sanity check
 uv run python explainability/simulate_intervention.py
 ```
 
-**Batch** (full population, output CSV + Pareto + U-distribution):
+See F8–F27 in `findings.md` for the correct reading of these outputs.
+
+### Explainability & figures
 
 ```powershell
-# GUIDEseq (in vivo) — per_run on-target abduction
-uv run python explainability/simulate_intervention_batch.py --dataset guideseq
-
-# CHANGEseq (in vitro) — drop on-target abduction (no run column)
-uv run python explainability/simulate_intervention_batch.py --dataset changeseq
-
-# Override model or batch size
-uv run python explainability/simulate_intervention_batch.py `
-    --dataset guideseq `
-    --model_path experiments/results/Exp15_Positional_ExtendedOneCycle/neural_scm.pt `
-    --batch_size 1024
+uv run python explainability/explain_thermodynamics.py        # positional penalty profile
+uv run python explainability/characterize_saturated_pairs.py  # U bimodality / saturation
+uv run python explainability/make_dag_figure.py               # thesis DAG (also make_dag_figure_tufte.py)
 ```
 
-Outputs in `explainability/batch_results/`:
+Figures land in `explainability/plots/` and `explainability/thesis_results/`.
 
-- `<dataset>_batch_results.csv`            — one row per pair (21 columns)
-- `<dataset>_per_guide_medians.csv`        — median within guide (defragments
-                                              the bias from guides with many off-targets)
-- `<dataset>_pareto.png`                   — (Δon, Δoff) scatter per intervention
-- `<dataset>_U_distribution.png`           — histograms of inferred noise
-
-See F8–F11 in `findings.md` for the correct reading of these plots.
-
-### Thermodynamic explainability
-
-Positional profile `|W_i × s_i|` per mismatch chemistry (Match / Wobble /
-Transition / Transversion) — visualizes the "causal X-ray" of the
-`positional_mlp` model:
+### Causal Consistency Score & statistical comparison
 
 ```powershell
-uv run python explainability/explain_thermodynamics.py
+uv run pytest tests/test_ccs_adopted.py tests/test_ccs_falsifiability.py
+uv run python tests/statistical_comparison.py    # DeLong / paired-bootstrap vs baselines
 ```
-
-Output: `explainability/plots/thermodynamic_profile.png`.
 
 ---
 
@@ -169,28 +176,44 @@ uv run pytest -q
 
 ---
 
-## Architectural principles
+## Thesis & defense slides
 
-1. `dag/` is independent of `models/` and `explainability/`. DAG features are
-   an *input* for the baseline and a *structural guide* for the neural SCM.
-2. `evaluation/` exposes a uniform `predict_proba(...)` and `explain(...)` API
-   across all models (baseline + Neural SCM).
-3. `experiments/<exp>/run.py` is orchestration only: loads config, invokes
-   modules, saves output. No model logic inside.
-4. The Neural SCM is built from **independent modules** assembled in an
-   explicit DAG (PAM gate + non-seed + seed-extension + proximal + optional GC
-   context). Each architecture is a different combination of modules on the
-   same interface (`models/deep/neural_scm.py`).
+- **Thesis** — `doc/thesis/` (LaTeX: `0_abstract` … `5_conclusions`, `refs.bib`). Chapter 4
+  holds the headline results, ablations, the abducted-noise `U` analysis, the cross-assay
+  calibration `b(E)`, and the Causal Consistency Score.
+- **Defense slides** — `phd-interview/` is a self-contained open-slide React deck; the
+  defense lives in `slides/laurea/`:
+
+  ```powershell
+  cd phd-interview
+  npm install   # first time
+  npm run dev   # http://localhost:5173  → open the "laurea" deck
+  ```
 
 ---
 
-## Open work streams
+## Architectural principles
 
-Tracked under `## Todo Phase 4` in `findings.md`:
+1. `dag/` is independent of `models/` and `explainability/`. DAG features are an *input*
+   for the baselines and a *structural guide* for the Neural SCM.
+2. `evaluation/` exposes a uniform `predict_proba(...)` / `explain(...)` API across all
+   models, plus the `do(·)`-based Causal Consistency Score (`evaluation/ccs.py`).
+3. `experiments/<exp>/run.py` is orchestration only: load config, invoke modules, save
+   output. No model logic inside.
+4. The Neural SCM is assembled from **independent modules** in an explicit DAG (PAM gate +
+   positional penalties + optional GC context), with two biophysical priors enforced
+   *parametrically* rather than as soft regularisation: non-negative per-position penalties
+   (`P_i ≥ 0`) and non-positive combiner weights (`w_pos ≤ 0`, monotonicity). Each
+   architecture is a different combination of modules on the same interface
+   (`models/deep/neural_scm.py`).
 
-- Guide-specific rescue mutation (replaces the fixed pos15 mutation).
-- Stratification of `U_off` on CHANGEseq by GC% and chromatin accessibility, to
-  validate the "U_off = cell-free saturation" hypothesis (F9).
-- Bootstrap CIs on per-guide means of counterfactual Δ values.
-- SCM architecture with an assay-specific calibration head (in vitro vs in vivo)
-  to address the F1/F9 bias in a principled way.
+---
+
+## Status
+
+**Phase 9 (final).** The split audit (F24), the external CCLMoff baseline (F25), the
+`λ_causal` sweet spot (F26), and the merged-split final model (F27) close the empirical
+program; the adopted **Exp30** model is the result. The one identified-but-unremoved term
+is the evaluation component `b_eval(E)` of the cross-assay calibration (binary-vs-continuous
+target mismatch) — discussed in `doc/thesis/5_conclusions.tex` and the end of
+`doc/findings.md`.
