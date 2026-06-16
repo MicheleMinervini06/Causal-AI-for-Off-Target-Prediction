@@ -171,122 +171,74 @@ def main():
         delta = pos_freq_sat[i] - pos_freq_nsat[i]
         print(f"{i:<4d}  {pos_freq_nsat[i]:>10.3f}  {pos_freq_sat[i]:>10.3f}  {delta:>+8.3f}")
 
-    # === Plot ===
-    sns.set_theme(style="whitegrid")
-    fig, axes = plt.subplots(3, 3, figsize=(17, 13))
+    # === Plots ===
+    # Two separate figures aligned with the narrative of Section 4.4.3:
+    #   (a) Effect size by feature  -> changeseq_saturated_effect_size.png
+    #   (b) Per-guide saturation rate distribution -> changeseq_saturated_per_guide.png
+    # The two are combined as subfigures in the LaTeX source for thesis layout.
+    # Palette aligned with the rest of the thesis figures.
+    COLOR_NSAT = "#7373FF"          # pgfplots blue!55 — not saturated (baseline)
+    COLOR_SAT  = "#D62728"          # crimson — saturated (alert / outlier)
+    COLOR_GUIDE_HIST = "#FFA64D"    # pgfplots orange!70 — per-guide distribution
 
-    # Panel: distance
-    ax = axes[0, 0]
-    bins = np.arange(0, max(df["distance"].max(), 7) + 1.5) - 0.5
-    ax.hist(nsat["distance"].values, bins=bins, color="steelblue", alpha=0.65, label="Not saturated", density=True)
-    ax.hist(sat["distance"].values,  bins=bins, color="crimson",   alpha=0.65, label="Saturated", density=True)
-    ax.set_xlabel("Number of mismatches (distance)")
-    ax.set_ylabel("Density")
-    ax.set_title("Total mismatch count")
-    ax.legend()
+    sns.set_theme(style="whitegrid", context="talk")
 
-    # Panel: seed mismatches
-    ax = axes[0, 1]
-    bins = np.arange(0, 9) - 0.5
-    ax.hist(nsat["mm_seed_count"].values, bins=bins, color="steelblue", alpha=0.65, label="Not saturated", density=True)
-    ax.hist(sat["mm_seed_count"].values,  bins=bins, color="crimson",   alpha=0.65, label="Saturated", density=True)
-    ax.set_xlabel("Mismatches in seed (pos 8-15)")
-    ax.set_ylabel("Density")
-    ax.set_title("Seed mismatches")
-    ax.legend()
-
-    # Panel: PAM-proximal mismatches
-    ax = axes[0, 2]
-    bins = np.arange(0, 5) - 0.5
-    ax.hist(nsat["mm_prox_count"].values, bins=bins, color="steelblue", alpha=0.65, label="Not saturated", density=True)
-    ax.hist(sat["mm_prox_count"].values,  bins=bins, color="crimson",   alpha=0.65, label="Saturated", density=True)
-    ax.set_xlabel("Mismatches in PAM-proximal (pos 16-19)")
-    ax.set_ylabel("Density")
-    ax.set_title("PAM-proximal mismatches")
-    ax.legend()
-
-    # Panel: GC sgRNA
-    ax = axes[1, 0]
-    bins = np.linspace(0, 1, 40)
-    ax.hist(nsat["gc_sgrna"].values, bins=bins, color="steelblue", alpha=0.65, label="Not saturated", density=True)
-    ax.hist(sat["gc_sgrna"].values,  bins=bins, color="crimson",   alpha=0.65, label="Saturated", density=True)
-    ax.set_xlabel("sgRNA GC content")
-    ax.set_ylabel("Density")
-    ax.set_title("sgRNA GC")
-    ax.legend()
-
-    # Panel: GC delta
-    ax = axes[1, 1]
-    bins = np.linspace(-0.5, 0.5, 40)
-    ax.hist(nsat["gc_delta"].values, bins=bins, color="steelblue", alpha=0.65, label="Not saturated", density=True)
-    ax.hist(sat["gc_delta"].values,  bins=bins, color="crimson",   alpha=0.65, label="Saturated", density=True)
-    ax.set_xlabel("GC(sgRNA) - GC(off-target spacer)")
-    ax.set_ylabel("Density")
-    ax.set_title("GC delta")
-    ax.legend()
-
-    # Panel: pam_off_f
-    ax = axes[1, 2]
-    bins = np.linspace(df["pam_off_f"].min(), df["pam_off_f"].max(), 40)
-    ax.hist(nsat["pam_off_f"].values, bins=bins, color="steelblue", alpha=0.65, label="Not saturated", density=True)
-    ax.hist(sat["pam_off_f"].values,  bins=bins, color="crimson",   alpha=0.65, label="Saturated", density=True)
-    ax.set_xlabel("Model pam_gate (sigmoid)")
-    ax.set_ylabel("Density")
-    ax.set_title("Model PAM gate output")
-    ax.legend()
-
-    # Panel: per-position mismatch frequency
-    ax = axes[2, 0]
-    x = np.arange(20)
-    width = 0.4
-    ax.bar(x - width/2, pos_freq_nsat, width, color="steelblue", alpha=0.75, label="Not saturated")
-    ax.bar(x + width/2, pos_freq_sat,  width, color="crimson",   alpha=0.75, label="Saturated")
-    ax.set_xlabel("Position (0=PAM-distal, 19=PAM-proximal)")
-    ax.set_ylabel("P(mismatch at this position)")
-    ax.set_title("Per-position mismatch frequency")
-    ax.legend()
-    ax.axvspan(-0.5, 7.5, alpha=0.05, color="green")
-    ax.axvspan(7.5, 15.5, alpha=0.05, color="orange")
-    ax.axvspan(15.5, 19.5, alpha=0.05, color="red")
-
-    # Panel: per-guide saturation rate distribution
-    ax = axes[2, 1]
-    ax.hist(per_guide["sat_rate"].values, bins=30, color="purple", alpha=0.7, edgecolor="white")
-    ax.axvline(per_guide["sat_rate"].mean(), color="red", linestyle="--",
-               label=f"mean={per_guide['sat_rate'].mean():.2f}")
-    ax.axvline(per_guide["sat_rate"].median(), color="black", linestyle=":",
-               label=f"median={per_guide['sat_rate'].median():.2f}")
-    ax.set_xlabel("Per-guide saturation rate")
-    ax.set_ylabel("Number of guides")
-    ax.set_title(f"Saturation rate per guide (n={len(per_guide)})")
-    ax.legend()
-
-    # Panel: Cohen's d barplot
-    ax = axes[2, 2]
+    # --- (a) Cohen's d by feature ---
+    fig, ax = plt.subplots(figsize=(8.5, 5.5))
     sorted_results = sorted(continuous_results, key=lambda r: abs(r["cohens_d"]), reverse=True)
     labels = [r["label"] for r in sorted_results]
     ds = [r["cohens_d"] for r in sorted_results]
-    colors = ["crimson" if d > 0 else "steelblue" for d in ds]
+    colors = [COLOR_SAT if d > 0 else COLOR_NSAT for d in ds]
     y_pos = np.arange(len(labels))
-    ax.barh(y_pos, ds, color=colors, alpha=0.75)
+    ax.barh(y_pos, ds, color=colors, alpha=0.85, edgecolor="black", linewidth=0.5)
     ax.set_yticks(y_pos)
-    ax.set_yticklabels(labels, fontsize=8)
+    ax.set_yticklabels(labels, fontsize=10)
+    ax.invert_yaxis()
     ax.axvline(0, color="black", linewidth=0.8)
-    ax.axvline(0.2, color="gray", linestyle=":", linewidth=0.6, label="small (0.2)")
-    ax.axvline(0.5, color="gray", linestyle="--", linewidth=0.6, label="medium (0.5)")
-    ax.axvline(0.8, color="gray", linestyle="-", linewidth=0.6, label="large (0.8)")
-    ax.axvline(-0.2, color="gray", linestyle=":", linewidth=0.6)
-    ax.axvline(-0.5, color="gray", linestyle="--", linewidth=0.6)
-    ax.axvline(-0.8, color="gray", linestyle="-", linewidth=0.6)
-    ax.set_xlabel("Cohen's d (saturated - not_saturated, positive = higher in saturated)")
-    ax.set_title("Effect size by feature")
-    ax.legend(loc="lower right", fontsize=7)
-
+    for lvl, ls in [(0.2, ":"), (0.5, "--"), (0.8, "-")]:
+        ax.axvline( lvl, color="gray", linestyle=ls, linewidth=0.6)
+        ax.axvline(-lvl, color="gray", linestyle=ls, linewidth=0.6)
+    ax.set_xlabel("Cohen's $d$ (saturated $-$ not saturated)")
     plt.tight_layout()
-    plot_path = args.output_dir / "changeseq_saturated_pairs_characterization.png"
-    plt.savefig(plot_path, dpi=200)
+    plot_a = args.output_dir / "changeseq_saturated_effect_size.png"
+    plt.savefig(plot_a, dpi=200, bbox_inches="tight")
     plt.close()
-    print(f"\nSalvato {plot_path}")
+    print(f"\nSalvato {plot_a}")
+
+    # --- (b) Per-guide saturation rate distribution ---
+    fig, ax = plt.subplots(figsize=(8.5, 5.5))
+    ax.hist(per_guide["sat_rate"].values, bins=30,
+            color=COLOR_GUIDE_HIST, alpha=0.85, edgecolor="white", linewidth=0.5)
+    mean_rate = per_guide["sat_rate"].mean()
+    med_rate  = per_guide["sat_rate"].median()
+    ax.axvline(med_rate, color="black", linestyle=":",
+               label=f"median = {med_rate:.2f}", linewidth=1.8)
+    ax.axvline(mean_rate, color=COLOR_SAT, linestyle="--",
+               label=f"mean = {mean_rate:.2f}", linewidth=1.8)
+    # Annotate the sgRNA that contributes the largest absolute volume of
+    # saturated rows (not just the highest per-guide rate -- some guides have
+    # high rate but very few pairs and are therefore irrelevant in absolute
+    # terms). The per_guide DataFrame is indexed by "name".
+    total_sat = int(per_guide["n_saturated"].sum())
+    outlier = per_guide.sort_values("n_saturated", ascending=False).iloc[0]
+    outlier_name = str(outlier.name).replace("_", r"\_")
+    outlier_share = outlier["n_saturated"] / total_sat
+    ax.annotate(
+        f"{outlier_name}\nrate $= {outlier['sat_rate']:.2f}$\n"
+        f"({outlier_share * 100:.1f}\\% of all saturated)",
+        xy=(outlier["sat_rate"], 1),
+        xytext=(outlier["sat_rate"] - 0.30, 12),
+        fontsize=10, color=COLOR_SAT,
+        arrowprops=dict(arrowstyle="->", color=COLOR_SAT, lw=1.0),
+    )
+    ax.set_xlabel("Per-guide saturation rate")
+    ax.set_ylabel(f"Number of guides ($n = {len(per_guide)}$)")
+    ax.legend(loc="upper right", fontsize=11)
+    plt.tight_layout()
+    plot_b = args.output_dir / "changeseq_saturated_per_guide.png"
+    plt.savefig(plot_b, dpi=200, bbox_inches="tight")
+    plt.close()
+    print(f"Salvato {plot_b}")
 
     # === JSON output ===
     payload = {

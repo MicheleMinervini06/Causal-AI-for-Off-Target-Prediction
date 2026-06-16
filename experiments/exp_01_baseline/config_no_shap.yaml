@@ -1,0 +1,11 @@
+_base: experiments/exp_01_baseline/config.yaml
+
+# Override: skip SHAP and ablation to speed up runs that only need
+# per-instance predictions for downstream statistical testing (DeLong,
+# paired bootstrap). SHAP on 1.48M GUIDE-seq rows is memory-heavy and
+# unnecessary for that purpose.
+logging:
+  save_shap: false
+
+ablation:
+  run: false

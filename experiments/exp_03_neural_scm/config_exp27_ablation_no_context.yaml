@@ -1,0 +1,13 @@
+_base: experiments/exp_03_neural_scm/config_exp24_merged_split.yaml
+
+experiment:
+  name: Exp27_Ablation_NoContext
+  tags: ["ablation", "context_features", "no_context", "chapter_4"]
+  notes: "Ablation per Chapter 4 Sec 4.3: stesso setup di Exp24 ma SENZA le 3 context features esogene (gc_sgRNA, gc_offtarget, concept_gc_delta). Testa se le feature esogene contribuiscono alla performance — in particolare se aiutano la calibrazione cross-assay."
+
+model:
+  context_cols: []
+  # Tutto il resto ereditato da Exp24:
+  #   architecture=positional_mlp, embed_dim=16, hidden_dim=8,
+  #   encoder=biological_mismatch, pam_mode=additive, positional_use_encoder=false,
+  #   hard_monotonicity=true

@@ -1,0 +1,13 @@
+_base: experiments/exp_03_neural_scm/config_exp24_merged_split.yaml
+
+experiment:
+  name: Exp26_Ablation_NoMonotonicity
+  tags: ["ablation", "hard_prior", "no_monotonicity", "chapter_4"]
+  notes: "Ablation per Chapter 4 Sec 4.3: stesso setup di Exp24 ma RILASCIA il hard prior w_pos,i <= 0 (hard_monotonicity=false). I 20 positional weights diventano parametri liberi. Testa se il prior strutturale e' necessario o se il modello impara comunque l'asimmetria seed/distal dai dati."
+
+model:
+  hard_monotonicity: false
+  # Tutto il resto ereditato da Exp24:
+  #   architecture=positional_mlp, embed_dim=16, hidden_dim=8,
+  #   encoder=biological_mismatch, pam_mode=additive, positional_use_encoder=false,
+  #   context_cols=[gc_sgRNA, gc_offtarget, concept_gc_delta]

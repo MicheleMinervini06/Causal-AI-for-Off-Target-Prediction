@@ -1,0 +1,14 @@
+_base: experiments/exp_03_neural_scm/config_exp24_merged_split.yaml
+
+experiment:
+  name: Exp28_Ablation_EncoderPairwise
+  tags: ["ablation", "encoder", "pairwise", "positional_use_encoder", "chapter_4"]
+  notes: "Ablation per Chapter 4 Sec 4.3: stesso setup di Exp24 ma encoder=pairwise e positional_use_encoder=true. Il pos_node riceve 16-dim learned embeddings sulle coppie (sgRNA_base, off_base) invece del 4-dim mismatch-type interno. Confronta con Exp30 (baseline biological_mismatch + use_encoder=true)."
+
+model:
+  encoder: "pairwise"
+  positional_use_encoder: true
+  # Tutto il resto ereditato da Exp24:
+  #   architecture=positional_mlp, embed_dim=16, hidden_dim=8,
+  #   pam_mode=additive, hard_monotonicity=true,
+  #   context_cols=[gc_sgRNA, gc_offtarget, concept_gc_delta]

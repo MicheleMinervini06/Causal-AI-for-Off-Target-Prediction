@@ -77,14 +77,14 @@ class EvalResult:
 
     def print(self) -> None:
         print(f"\n{'='*55}")
-        print(f"  {self.model_name} — {self.split}")
+        print(f"  {self.model_name} - {self.split}")
         print(f"{'='*55}")
-        print(f"  AUPRC:         {self.auprc:.4f}  ← metrica principale")
+        print(f"  AUPRC:         {self.auprc:.4f}  <- main metric")
         print(f"  AUROC:         {self.auroc:.4f}")
         print(f"  F1:            {self.f1:.4f}  (threshold={self.threshold:.3f})")
         print(f"  Balanced Acc:  {self.balanced_acc:.4f}")
-        print(f"  Pos predetti:  {self.n_pos_pred} / {self.n_pos_true} reali")
-        print(f"  Totale:        {self.n_total}")
+        print(f"  Pos predicted: {self.n_pos_pred} / {self.n_pos_true} true")
+        print(f"  Total:         {self.n_total}")
         print(f"{'='*55}")
 
 

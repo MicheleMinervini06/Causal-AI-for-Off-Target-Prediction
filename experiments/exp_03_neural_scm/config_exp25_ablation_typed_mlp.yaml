@@ -1,0 +1,12 @@
+_base: experiments/exp_03_neural_scm/config_exp24_merged_split.yaml
+
+experiment:
+  name: Exp25_Ablation_TypedMLP
+  tags: ["ablation", "architecture", "typed_mlp", "chapter_4"]
+  notes: "Ablation per Chapter 4 Sec 4.3: stesso setup di Exp24 (clean merged split, focal loss, lambda_causal=0.1, additive PAM, biological encoder) ma con architettura typed_mlp invece di positional_mlp. Testa se i 3 nodi regionali (proximal/seed/non_seed) sono sufficienti o se i 20 nodi posizionali aggiungono valore."
+
+model:
+  architecture: "typed_mlp"
+  # Tutti gli altri model params ereditati da Exp24:
+  #   embed_dim=16, hidden_dim=8, encoder=biological_mismatch, pam_mode=additive,
+  #   context_cols=[gc_sgRNA, gc_offtarget, concept_gc_delta], variational=false

@@ -62,7 +62,8 @@ def load_config(path: Path) -> dict:
     with open(path) as f:
         cfg = yaml.safe_load(f)
 
-    if "_base" in cfg:
+    # Resolve _base recursively (the chain can be > 1 level deep).
+    while "_base" in cfg:
         base_path = ROOT / cfg.pop("_base")
         with open(base_path) as f:
             base = yaml.safe_load(f)
@@ -116,6 +117,28 @@ def prepare_xy(
 
 
 # ── SHAP ──────────────────────────────────────────────────────────────────────
+
+def save_predictions(
+    df: pd.DataFrame,
+    probs: np.ndarray,
+    path: Path,
+) -> None:
+    """Save per-instance predictions for downstream statistical testing.
+
+    Output: parquet with [sgRNA_seq, off_seq, label, prob] for the test rows.
+    Required for DeLong / paired bootstrap comparisons across models.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    keep_cols = [c for c in ("sgRNA_seq", "off_seq", "label") if c in df.columns]
+    out = df[keep_cols].reset_index(drop=True).copy()
+    # predict_proba may return 2D (n, 2); keep positive-class probability
+    probs_arr = np.asarray(probs)
+    if probs_arr.ndim == 2 and probs_arr.shape[1] >= 2:
+        probs_arr = probs_arr[:, 1]
+    out["prob"] = probs_arr.astype(np.float32).reshape(-1)
+    out.to_parquet(path, index=False)
+    log.info("Predictions saved: %s (%d rows)", path, len(out))
+
 
 def save_shap(
     shap_vals:     np.ndarray,
@@ -243,14 +266,16 @@ def run_model_pipeline(
         metric=cfg["evaluation"]["threshold_metric"],
     )
 
+    p_test = model.predict_proba(X_test)
     result_within = evaluate_model(
         model_name,
         y_test,
-        model.predict_proba(X_test),
+        p_test,
         split="within_test",
         threshold=optimal_thr,
         store_curves=cfg["evaluation"]["store_curves"],
     )
+    save_predictions(test, p_test, results_dir / f"predictions_{model_name.lower()}_test.parquet")
 
     all_results: list[EvalResult] = [result_within]
     X_guide: np.ndarray | None = None
@@ -258,15 +283,17 @@ def run_model_pipeline(
 
     if guide_df is not None:
         X_guide, y_guide, _ = prepare_xy(guide_df, used_cols)
+        p_guide = model.predict_proba(X_guide)
         result_cross = evaluate_model(
             model_name,
             y_guide,
-            model.predict_proba(X_guide),
+            p_guide,
             split="cross_assay",
             threshold=optimal_thr,
             store_curves=cfg["evaluation"]["store_curves"],
         )
         all_results.append(result_cross)
+        save_predictions(guide_df, p_guide, results_dir / f"predictions_{model_name.lower()}_guideseq.parquet")
 
     if cfg["logging"]["save_shap"]:
         save_shap(

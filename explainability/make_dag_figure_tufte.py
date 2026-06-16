@@ -1,33 +1,25 @@
-"""Causal DAG figure for Chapter 3 of the thesis.
+"""Causal DAG figure — TUFTE-STYLED TEST VARIANT.
 
-This is the BIOLOGICAL CAUSAL GRAPH that the Neural SCM is asked to
-instantiate. It is not the network architecture per se; it is the
-structural template from which the architecture is derived
-(Section 3.1 of the thesis), then formalized as a Structural Causal
-Model in Section 3.2.
+This is an experimental restyling of ``make_dag_figure.py`` that applies
+Edward Tufte's principles (VDQI 1983/2001) to the causal DAG of Chapter 3.
+It does NOT replace the original; it writes to a separate output file so the
+two can be compared side by side.
 
-Reflects the final adopted model (positional_mlp + additive PAM +
-GC context, Exp24 in findings.md):
+Content is identical to the canonical figure (same nodes, edges, equations).
+Only the *visual treatment* changes, following the kill-list:
 
-  - 20 positional penalty nodes P_0..P_19 (one per protospacer position),
-    indices following the convention in models/deep/neural_scm.py:
-    P_0 is the most PAM-distal (5' end), P_19 the most PAM-proximal.
-  - Regional groupings (non-seed, seed, PAM-proximal) are shown as
-    DERIVED VIEWS via brackets, not as independent causal nodes
-    (Section 3.1 of the thesis).
-  - Context node g_ctx = rho(X_ctx) (Equation eq:rho-ctx) enters
-    ADDITIVELY into the structural logit. X_ctx is a deterministic
-    slice of X (the three GC-composition features) and is therefore
-    part of the structural mechanism, not of U.
-  - PAM compatibility g_pam = psi(X_pam) enters ADDITIVELY into the
-    structural logit (Section 3.2.2: additive vs multiplicative choice
-    is discussed and motivated there).
-  - Exogenous noise U enters additively at the final logit, independent
-    of X under the Independent Causal Mechanisms principle of
-    Section 2.4.1 (recovered algebraically, Section 3.3).
-  - The structural logit l_struct combines all deterministic
-    contributions per Equation 3.2.3 (eq:struct-logit); the sigmoid
-    produces the observed outcome Y per Equation 3.2.4 (eq:cas9-anm).
+  - Near-monochrome palette. Node ROLE is encoded by subtle luminance/tint
+    (warm vs cool faint grays), not by five saturated hues competing for
+    attention ("smallest effective difference", Visual Explanations p. 73).
+  - A SINGLE accent colour, reserved for the focal outcome node Y, plus one
+    restrained muted green for the thesis's signature relationship (the
+    monotonic hard-prior weighted edges). Two meaningful accents, no rainbow.
+  - Thin light-gray borders instead of heavy black ones (erase non-data-ink).
+  - Regular weight type; bold reserved for the focal outcome only
+    (layering and separation — data on top, scaffolding faintest).
+  - Frameless legends, frameless edge labels (erase the box, keep the word).
+
+See ``.claude/skills/tufte-claude-skill/`` for the principles applied.
 """
 from __future__ import annotations
 
@@ -37,49 +29,57 @@ import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 from matplotlib.patches import FancyArrowPatch, FancyBboxPatch
 
-OUT = Path("explainability/plots/thesis_fig0_dag.png")
+OUT = Path("explainability/plots/thesis_fig0_dag_tufte.png")
 
-# --- visual palette ----------------------------------------------------
-# Bright/saturated palette, mirrors make_architecture_figure.py for
-# stylistic coherence between the abstract DAG (Fig 3.1) and the
-# implementation view (Fig 3.2).
-BG_FACE       = "#ffffff"   # clean white background
-TEXT_PRIMARY  = "#000000"   # primary text color
-TEXT_MUTED    = "#444444"   # muted text
+# --- visual palette (Tufte: near-monochrome + one focal accent) --------
+BG_FACE       = "#ffffff"
+INK           = "#2b2b2b"   # near-black: primary text / focal data
+INK_MUTED     = "#8a8a8a"   # gray: scaffolding, secondary labels
 
-COLOR_INPUT   = "#bcd6ec"   # light blue      - observed inputs (sgRNA, GC, PAM)
-COLOR_LATENT  = "#ffd9a8"   # light orange    - latent constructs (P_i, g_ctx, g_pam)
-COLOR_EXOG    = "#e8e0f0"   # light purple    - exogenous noise U (dashed border)
-COLOR_LOGIT   = "#d7e6c9"   # light green     - structural logit (combiner)
-COLOR_OUTCOME = "#f5a8a8"   # light red       - measured outcome Y
+# Node fills: faint tints that encode ROLE by subtle warm/cool luminance,
+# not by saturated hue. The border style / accent carries the special cases.
+FILL_INPUT    = "#eaf0f4"   # faint cool gray   - observed inputs
+FILL_LATENT   = "#f4f1ec"   # faint warm gray   - latent constructs
+FILL_EXOG     = "#ffffff"   # white             - exogenous (dashed border = meaning)
+FILL_LOGIT    = "#edf0ea"   # faint green-gray  - combiner
+FILL_OUTCOME  = "#f6e3e1"   # faint red tint    - outcome (the focal node)
 
-COLOR_EDGE_F  = "#555555"   # gray            - structural assignment (phi, rho, psi, sigma)
-COLOR_EDGE_W  = "#0b5e2b"   # dark green      - weighted edges (w_pos,i)
-COLOR_EDGE_A  = "#1f3b6e"   # dark blue       - additive contribution
-COLOR_EDGE_U  = "#7a3a99"   # purple          - exogenous noise (dashed)
-COLOR_REGION  = "#444444"   # gray            - regional grouping brackets
+BORDER        = "#b9b9b9"   # light gray: default node border
+BORDER_EXOG   = "#9a9a9a"   # exogenous (dashed)
+ACCENT        = "#b23b39"   # the single accent: focal outcome Y
+
+# Edges: gray by default; differentiate by STYLE and label, not by rainbow.
+COLOR_EDGE_F  = "#9a9a9a"   # gray  - structural assignment (phi, rho, psi, sigma)
+COLOR_EDGE_W  = "#4f7a5f"   # muted green - weighted hard-prior edges (signature)
+COLOR_EDGE_A  = "#9a9a9a"   # gray  - additive ("+" label carries the meaning)
+COLOR_EDGE_U  = "#9a9a9a"   # gray, dashed - exogenous noise
+COLOR_REGION  = "#9a9a9a"   # gray  - regional grouping brackets
 
 
 def box(ax, xy, text, kind, w=1.8, h=0.9, fontsize=10, dashed=False):
-    color = {
-        "input":   COLOR_INPUT,
-        "latent":  COLOR_LATENT,
-        "exog":    COLOR_EXOG,
-        "logit":   COLOR_LOGIT,
-        "outcome": COLOR_OUTCOME,
+    fill = {
+        "input":   FILL_INPUT,
+        "latent":  FILL_LATENT,
+        "exog":    FILL_EXOG,
+        "logit":   FILL_LOGIT,
+        "outcome": FILL_OUTCOME,
     }[kind]
+    # Focal node gets the accent border + bold text; everything else is quiet.
+    focal = kind == "outcome"
+    edge = ACCENT if focal else (BORDER_EXOG if dashed else BORDER)
     x, y = xy
     linestyle = "--" if dashed else "-"
     patch = FancyBboxPatch(
         (x - w / 2, y - h / 2), w, h,
         boxstyle="round,pad=0.05,rounding_size=0.10",
-        linewidth=1.6 if dashed else 1.2,
-        edgecolor="black", facecolor=color,
+        linewidth=1.4 if (dashed or focal) else 1.0,
+        edgecolor=edge, facecolor=fill,
         linestyle=linestyle, zorder=3,
     )
     ax.add_patch(patch)
     ax.text(x, y, text, ha="center", va="center",
-            fontsize=fontsize, fontweight="bold", zorder=4)
+            fontsize=fontsize, color=INK,
+            fontweight="bold" if focal else "normal", zorder=4)
 
 
 def pos_node(ax, xy, label, w=0.85, h=0.55, fontsize=10):
@@ -88,15 +88,15 @@ def pos_node(ax, xy, label, w=0.85, h=0.55, fontsize=10):
     patch = FancyBboxPatch(
         (x - w / 2, y - h / 2), w, h,
         boxstyle="round,pad=0.03,rounding_size=0.07",
-        linewidth=1.0, edgecolor="black", facecolor=COLOR_LATENT, zorder=3,
+        linewidth=0.8, edgecolor=BORDER, facecolor=FILL_LATENT, zorder=3,
     )
     ax.add_patch(patch)
     ax.text(x, y, label, ha="center", va="center",
-            fontsize=fontsize, fontweight="bold", zorder=4)
+            fontsize=fontsize, color=INK, zorder=4)
 
 
 def arrow(ax, src, dst, color, label=None, label_pos=0.5,
-          style="-", curvature=0.0, lw=1.4,
+          style="-", curvature=0.0, lw=1.2,
           shrinkA=10, shrinkB=10, mutation_scale=12):
     connectionstyle = f"arc3,rad={curvature}"
     a = FancyArrowPatch(
@@ -110,10 +110,12 @@ def arrow(ax, src, dst, color, label=None, label_pos=0.5,
     if label:
         mx = src[0] + (dst[0] - src[0]) * label_pos
         my = src[1] + (dst[1] - src[1]) * label_pos
+        # Frameless label: a faint white halo for legibility over crossing
+        # lines (layering/separation), but no boxed border (erase the box).
         ax.text(mx, my, label, ha="center", va="center",
-                fontsize=9, color=color, fontweight="bold",
-                bbox=dict(boxstyle="round,pad=0.18", facecolor="white",
-                          edgecolor="none", alpha=0.9), zorder=5)
+                fontsize=9, color=color,
+                bbox=dict(boxstyle="round,pad=0.12", facecolor="white",
+                          edgecolor="none", alpha=0.75), zorder=5)
 
 
 def region_bracket(ax, x_left, x_right, y, label, color=COLOR_REGION,
@@ -121,12 +123,18 @@ def region_bracket(ax, x_left, x_right, y, label, color=COLOR_REGION,
     """Underline-style bracket BELOW a row of nodes, with label below."""
     bracket_y = y - 0.18
     text_y = y - text_offset
-    ax.plot([x_left, x_left], [y, bracket_y], color=color, lw=1.4)
-    ax.plot([x_right, x_right], [y, bracket_y], color=color, lw=1.4)
-    ax.plot([x_left, x_right], [bracket_y, bracket_y], color=color, lw=1.4)
+    ax.plot([x_left, x_left], [y, bracket_y], color=color, lw=1.0)
+    ax.plot([x_right, x_right], [y, bracket_y], color=color, lw=1.0)
+    ax.plot([x_left, x_right], [bracket_y, bracket_y], color=color, lw=1.0)
     ax.text((x_left + x_right) / 2, text_y, label,
-            ha="center", va="top", fontsize=8.5, fontweight="bold",
-            color=color, style="italic")
+            ha="center", va="top", fontsize=8.5, color=INK_MUTED,
+            style="italic")
+
+
+def edge_label(ax, x, y, text, color):
+    """Frameless italic annotation for a structural assignment."""
+    ax.text(x, y, text, ha="center", va="center",
+            fontsize=9, color=color, style="italic", zorder=5)
 
 
 def main():
@@ -168,7 +176,7 @@ def main():
     for x, lbl in positions:
         if lbl == "...":
             ax.text(x, pos_y, "⋯", ha="center", va="center",
-                    fontsize=14, color="#888", fontweight="bold")
+                    fontsize=14, color=INK_MUTED)
         else:
             pos_node(ax, (x, pos_y), lbl, w=0.75, h=0.55, fontsize=9)
 
@@ -200,7 +208,7 @@ def main():
         "logit", w=3.0, h=0.95, fontsize=10)
 
     # =====================================================================
-    # Layer 5: Outcome
+    # Layer 5: Outcome (focal node)
     # =====================================================================
     box(ax, (8.0, 0.5),
         r"$Y = \sigma(\ell_{\mathrm{struct}}(X) + U)$",
@@ -216,32 +224,18 @@ def main():
         if lbl == "...":
             continue
         arrow(ax, sgRNA_anchor, (x, pos_y + 0.30),
-              COLOR_EDGE_F, lw=0.7, mutation_scale=7, shrinkA=4, shrinkB=4)
-    ax.text(0.4, 6.65, r"$P_i = \phi(X_i)$" + "\n(shared)",
-            ha="center", va="center", fontsize=9, color=COLOR_EDGE_F,
-            fontweight="bold", style="italic",
-            bbox=dict(boxstyle="round,pad=0.22", facecolor="white",
-                      edgecolor=COLOR_EDGE_F, alpha=0.95))
+              COLOR_EDGE_F, lw=0.6, mutation_scale=7, shrinkA=4, shrinkB=4)
+    edge_label(ax, 0.4, 6.65, r"$P_i = \phi(X_i)$  (shared)", COLOR_EDGE_F)
 
     # ---- GC composition -> g_ctx (separate function rho) ----
-    arrow(ax, (8.5, 7.35), (8.5, 5.95),
-          COLOR_EDGE_F, lw=1.4)
-    ax.text(8.5, 6.65,
-            r"$g_{\mathrm{ctx}} = \rho(X_{\mathrm{ctx}})$",
-            ha="center", va="center", fontsize=9, color=COLOR_EDGE_F,
-            fontweight="bold", style="italic",
-            bbox=dict(boxstyle="round,pad=0.22", facecolor="white",
-                      edgecolor=COLOR_EDGE_F, alpha=0.95))
+    arrow(ax, (8.5, 7.35), (8.5, 5.95), COLOR_EDGE_F, lw=1.2)
+    edge_label(ax, 8.5, 6.65, r"$g_{\mathrm{ctx}} = \rho(X_{\mathrm{ctx}})$",
+               COLOR_EDGE_F)
 
     # ---- PAM -> g_pam (separate function psi) ----
-    arrow(ax, (12.5, 7.35), (12.5, 5.95),
-          COLOR_EDGE_F, lw=1.4)
-    ax.text(12.5, 6.65,
-            r"$g_{\mathrm{pam}} = \psi(X_{\mathrm{pam}})$",
-            ha="center", va="center", fontsize=9, color=COLOR_EDGE_F,
-            fontweight="bold", style="italic",
-            bbox=dict(boxstyle="round,pad=0.22", facecolor="white",
-                      edgecolor=COLOR_EDGE_F, alpha=0.95))
+    arrow(ax, (12.5, 7.35), (12.5, 5.95), COLOR_EDGE_F, lw=1.2)
+    edge_label(ax, 12.5, 6.65, r"$g_{\mathrm{pam}} = \psi(X_{\mathrm{pam}})$",
+               COLOR_EDGE_F)
 
     # ---- Positional nodes -> structural logit (weighted, w_pos,i <= 0) ----
     logit_anchor_in = (5.5, 3.30)
@@ -249,72 +243,72 @@ def main():
         if lbl == "...":
             continue
         arrow(ax, (x, pos_y - 0.30), logit_anchor_in,
-              COLOR_EDGE_W, lw=0.7, mutation_scale=7,
+              COLOR_EDGE_W, lw=0.6, mutation_scale=7,
               shrinkA=2, shrinkB=4)
-    ax.text(0.5, 4.05,
-            r"$w_{\mathrm{pos},i}\, P_i$, " + "\n"
-            + r"with $w_{\mathrm{pos},i} \leq 0$ (hard prior)",
-            ha="center", va="center", fontsize=9, color=COLOR_EDGE_W,
-            fontweight="bold", style="italic",
-            bbox=dict(boxstyle="round,pad=0.22", facecolor="white",
-                      edgecolor=COLOR_EDGE_W, alpha=0.95))
+    edge_label(ax, 0.6, 4.05,
+               r"$w_{\mathrm{pos},i}\, P_i,\ w_{\mathrm{pos},i} \leq 0$"
+               + "\n(hard prior)", COLOR_EDGE_W)
 
     # ---- g_ctx -> structural logit (additive) ----
     arrow(ax, (8.5, 4.92), (6.6, 3.30),
           COLOR_EDGE_A, label=r"$+\,g_{\mathrm{ctx}}$",
-          label_pos=0.55, curvature=-0.18, lw=1.5)
+          label_pos=0.55, curvature=-0.18, lw=1.2)
 
     # ---- g_pam -> structural logit (additive) ----
     arrow(ax, (12.5, 4.92), (7.0, 2.95),
           COLOR_EDGE_A, label=r"$+\,g_{\mathrm{pam}}$",
-          label_pos=0.50, curvature=-0.22, lw=1.5)
+          label_pos=0.50, curvature=-0.22, lw=1.2)
 
     # ---- Structural logit -> outcome (sigmoid) ----
     arrow(ax, (5.5, 2.32), (7.2, 0.95),
           COLOR_EDGE_F, label=r"$\sigma(\cdot)$",
-          label_pos=0.5, lw=1.5)
+          label_pos=0.5, lw=1.2)
 
     # ---- U -> outcome (additive, dashed for exogenous) ----
     arrow(ax, (13.6, 2.05), (9.4, 0.95),
           COLOR_EDGE_U, label=r"$+\,U$",
-          label_pos=0.50, style="--", curvature=-0.15, lw=1.4)
+          label_pos=0.50, style="--", curvature=-0.15, lw=1.2)
 
     # =====================================================================
-    # Legend
+    # Legend (frameless: erase the box, keep the key)
     # =====================================================================
     legend_nodes = [
-        FancyBboxPatch((0, 0), 1, 1, facecolor=COLOR_INPUT,
-                       edgecolor="black", label="Observed input"),
-        FancyBboxPatch((0, 0), 1, 1, facecolor=COLOR_LATENT,
-                       edgecolor="black",
+        FancyBboxPatch((0, 0), 1, 1, facecolor=FILL_INPUT,
+                       edgecolor=BORDER, label="Observed input"),
+        FancyBboxPatch((0, 0), 1, 1, facecolor=FILL_LATENT,
+                       edgecolor=BORDER,
                        label="Latent biological construct"),
-        FancyBboxPatch((0, 0), 1, 1, facecolor=COLOR_EXOG,
-                       edgecolor="black",
-                       linestyle="--", linewidth=1.4,
+        FancyBboxPatch((0, 0), 1, 1, facecolor=FILL_EXOG,
+                       edgecolor=BORDER_EXOG,
+                       linestyle="--", linewidth=1.2,
                        label=r"Exogenous noise ($U$, indep. of $X$)"),
-        FancyBboxPatch((0, 0), 1, 1, facecolor=COLOR_LOGIT,
-                       edgecolor="black",
+        FancyBboxPatch((0, 0), 1, 1, facecolor=FILL_LOGIT,
+                       edgecolor=BORDER,
                        label="Structural logit (combiner)"),
-        FancyBboxPatch((0, 0), 1, 1, facecolor=COLOR_OUTCOME,
-                       edgecolor="black", label="Observed outcome"),
+        FancyBboxPatch((0, 0), 1, 1, facecolor=FILL_OUTCOME,
+                       edgecolor=ACCENT, label="Observed outcome (focal)"),
     ]
     legend_edges = [
-        Line2D([0], [0], color=COLOR_EDGE_F, lw=2,
+        Line2D([0], [0], color=COLOR_EDGE_F, lw=1.6,
                label=r"Structural assignment ($\phi$, $\psi$, $\sigma$)"),
-        Line2D([0], [0], color=COLOR_EDGE_W, lw=2,
+        Line2D([0], [0], color=COLOR_EDGE_W, lw=1.6,
                label=r"Weighted edge ($w_{\mathrm{pos},i} \leq 0$, hard prior)"),
-        Line2D([0], [0], color=COLOR_EDGE_A, lw=2,
+        Line2D([0], [0], color=COLOR_EDGE_A, lw=1.6,
                label=r"Additive contribution ($+$)"),
-        Line2D([0], [0], color=COLOR_EDGE_U, lw=2, linestyle="--",
+        Line2D([0], [0], color=COLOR_EDGE_U, lw=1.6, linestyle="--",
                label=r"Exogenous noise ($+\,U$, dashed)"),
     ]
     leg1 = ax.legend(handles=legend_nodes, loc="lower left",
                      bbox_to_anchor=(-0.02, -0.16), fontsize=8.5,
-                     frameon=True, title="Nodes")
+                     frameon=False, title="Nodes",
+                     labelcolor=INK)
+    leg1.get_title().set_color(INK_MUTED)
     ax.add_artist(leg1)
-    ax.legend(handles=legend_edges, loc="lower right",
-              bbox_to_anchor=(1.02, -0.16), fontsize=8.5,
-              frameon=True, title="Edges")
+    leg2 = ax.legend(handles=legend_edges, loc="lower right",
+                     bbox_to_anchor=(1.02, -0.16), fontsize=8.5,
+                     frameon=False, title="Edges",
+                     labelcolor=INK)
+    leg2.get_title().set_color(INK_MUTED)
 
     plt.tight_layout()
     OUT.parent.mkdir(parents=True, exist_ok=True)

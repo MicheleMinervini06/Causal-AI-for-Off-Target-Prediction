@@ -358,6 +358,12 @@ def main(config_path: Path) -> None:
     positional_use_encoder = bool(model_cfg.get("positional_use_encoder", False))
     log.info("positional_use_encoder: %s", positional_use_encoder)
 
+    # Hard monotonicity prior on positional weights w_pos,i <= 0.
+    # Default True (Run18+). Set False for the no-monotonicity ablation
+    # that empirically validates the prior in Chapter 4.
+    hard_monotonicity = bool(model_cfg.get("hard_monotonicity", True))
+    log.info("hard_monotonicity: %s", hard_monotonicity)
+
     model = NeuralSCM(
         architecture=architecture,
         embed_dim=int(model_cfg.get("embed_dim", 16)),
@@ -369,6 +375,7 @@ def main(config_path: Path) -> None:
         u_encoder_detach_backbone=u_encoder_detach_backbone,
         pam_mode=pam_mode,
         positional_use_encoder=positional_use_encoder,
+        hard_monotonicity=hard_monotonicity,
     ).to(device)
 
     # 3. Train and save best model

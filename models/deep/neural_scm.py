@@ -28,6 +28,7 @@ class NeuralSCM(nn.Module):
         u_encoder_detach_backbone: bool = True,
         pam_mode: str = "multiplicative",
         positional_use_encoder: bool = False,
+        hard_monotonicity: bool = True,
     ):
         super().__init__()
         self.architecture = architecture
@@ -37,6 +38,10 @@ class NeuralSCM(nn.Module):
         if pam_mode not in ("multiplicative", "additive"):
             raise ValueError(f"pam_mode deve essere 'multiplicative' o 'additive', ricevuto: {pam_mode}")
         self.pam_mode = pam_mode
+        # Hard prior: w_pos,i <= 0 (mismatches can only hurt). Default True (Run18+).
+        # Set False for ablation that relaxes the constraint — used in Chapter 4
+        # to validate the architectural prior empirically.
+        self.hard_monotonicity = hard_monotonicity
         # Per positional_mlp: usa l'output ricco dell'encoder ([B, 20, encoder.embed_dim])
         # invece di ricalcolare internamente un 4-dim (mismatch_type only).
         # Default False = compat con Run 15/18.
@@ -469,8 +474,13 @@ class NeuralSCM(nn.Module):
         bias_eff = torch.clamp(self.bias, min=-4.0, max=3.0)
 
         if self.architecture == "positional_mlp":
-        # HARD PRIOR POSIZIONALE: Tutti i 20 pesi devono essere <= 0
-            w_pos_eff = -F.softplus(self.w_pos) # [20]
+            # HARD PRIOR POSIZIONALE: by default each w_pos,i is forced <= 0
+            # via -softplus(); the ablation `hard_monotonicity=False` uses the
+            # raw w_pos parameter to validate the prior empirically (Chapter 4).
+            if self.hard_monotonicity:
+                w_pos_eff = -F.softplus(self.w_pos)  # [20], strictly <= 0
+            else:
+                w_pos_eff = self.w_pos               # [20], unconstrained
             # Moltiplica ogni penalità per il suo peso e somma (Prodotto scalare)
             thermo_logit = torch.sum(pos_penalties * w_pos_eff, dim=1, keepdim=True) + bias_eff
         else:

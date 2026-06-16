@@ -1,9 +1,7 @@
 """Data preprocessing pipeline figure for Chapter 3 of the thesis (Figure 3.3).
 
 Visualizes the flow described in Section 3.4 of the thesis, from raw assay
-measurements (Lazzarotto et al. 2020 study, processed via Yaish et al. 2022
-protocol with Cas-OFFinder-derived negatives) to the four model-ready data
-splits used in Sections 3.5 and 3.6:
+measurements to the four model-ready data splits used in Sections 3.5 and 3.6:
 
   - CHANGE-seq is processed, per-guide partitioned into training, validation
     and within-distribution test splits;
@@ -104,15 +102,15 @@ def main():
         "input", w=3.6, h=1.0, fontsize=9.5)
 
     # =====================================================================
-    # Layer 2: Yaish 2022 preprocessing protocol (wide banner)
+    # Layer 2: Upstream filters applied to the consumed tables (wide banner)
     # =====================================================================
     box(ax, (7.5, 7.4),
-        "Yaish et al. 2022 preprocessing protocol\n"
-        "(read-count transformation, activity threshold, "
-        "inclusion of inactive sites)",
-        "module", w=11.0, h=1.1, fontsize=10)
+        "Upstream filters\n"
+        "CHANGE-seq positives: read count $> 100$   ·   DNA/RNA bulges excluded\n"
+        "negatives via Cas-OFFinder ($\\leq 6$ mismatches)",
+        "module", w=10.5, h=1.4, fontsize=9.5)
 
-    # arrows from raw sources to Yaish
+    # arrows from raw sources to the filters banner
     arrow(ax, (3.0, 8.85), (4.5, 8.05), COLOR_EDGE_F, lw=1.2,
           shrinkA=4, shrinkB=4)
     arrow(ax, (7.5, 8.75), (7.5, 8.05), COLOR_EDGE_F, lw=1.2,
@@ -167,9 +165,9 @@ def main():
     # Layer 5: Encoding (wide banner, applies to all four splits)
     # =====================================================================
     box(ax, (7.0, 1.1),
-        "Sequence encoding"
-        "4-dim mismatch-type per protospacer position  +  one-hot PAM tokens",
-        "latent", w=13.5, h=0.9, fontsize=10)
+        "Sequence encoding   ·   "
+        "mismatch-type per protospacer position  +  one-hot PAM tokens  +  GC composition features",
+        "latent", w=14.0, h=0.9, fontsize=10)
 
     # arrows from each split to the encoding banner (fan)
     for src_x in [1.5, 4.0, 6.5]:

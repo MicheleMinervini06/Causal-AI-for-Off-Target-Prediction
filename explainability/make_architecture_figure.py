@@ -6,15 +6,18 @@ by a dedicated trainable module or by a deterministic computation; arrows
 mirror the causal edges of the DAG and make the architectural choices
 explicit.
 
-Reflects the final adopted model (positional_mlp + additive PAM,
-Exp20 in findings.md), per Section 3.2 of the thesis:
+Reflects the final adopted model (positional_mlp + additive PAM +
+GC context module, Exp24 in findings.md), per Section 3.2 of the thesis:
 
   - Shared positional MLP phi (Equation eq:phi-i) applied independently
     to each of the 20 protospacer positions (weight sharing).
   - Separate PAM module psi (Equation eq:psi-pam).
+  - Separate context module rho (Equation eq:rho-ctx) consuming the three
+    GC-composition features (gc_sgRNA, gc_offtarget, |delta|).
   - Hard prior 1: P_i >= 0 via ReLU on the output of phi.
   - Hard prior 2: w_pos,i <= 0 via -softplus reparam (Equation eq:wpos-reparam).
-  - Combiner producing the structural logit l_struct (Equation eq:struct-logit).
+  - Combiner producing the structural logit l_struct (Equation eq:struct-logit)
+    as additive composition of positional, context, and PAM contributions.
   - Exogenous noise U recovered ALGEBRAICALLY (Section 3.3, eq:U-abduction),
     not learned: entering additively at the final logit.
   - Sigmoid producing the cleavage outcome Y (Equation eq:cas9-anm).
@@ -108,18 +111,20 @@ def arrow(ax, src, dst, color, label=None, label_pos=0.5,
 
 
 def main():
-    fig, ax = plt.subplots(figsize=(14, 10.5))
-    ax.set_xlim(-0.5, 14.5)
+    fig, ax = plt.subplots(figsize=(15, 10.5))
+    ax.set_xlim(-0.5, 15.5)
     ax.set_ylim(-1.8, 10.8)
     ax.set_aspect("equal")
     ax.axis("off")
 
     # =====================================================================
-    # Layer 1: Raw inputs
+    # Layer 1: Raw inputs (three columns: spacer, context, PAM)
     # =====================================================================
     box(ax, (3.5, 9.8), "sgRNA × off-target\n(20 nt protospacer)",
         "input", w=3.4, h=0.9, fontsize=10)
-    box(ax, (11.0, 9.8), "PAM\n(3 nt, e.g. NGG)",
+    box(ax, (8.5, 9.8), "GC composition\n(3 scalar features)",
+        "input", w=2.6, h=0.9, fontsize=10)
+    box(ax, (12.5, 9.8), "PAM\n(3 nt, e.g. NGG)",
         "input", w=2.4, h=0.9, fontsize=10)
 
     # =====================================================================
@@ -128,9 +133,12 @@ def main():
     box(ax, (3.5, 8.2),
         "Mismatch-type encoding\n(4 classes per position)\n[B × 20 × 4]",
         "latent", w=3.4, h=1.0, fontsize=9)
-    box(ax, (11.0, 8.2),
+    box(ax, (8.5, 8.2),
+        "GC feature vector\n[B × 3]",
+        "latent", w=2.4, h=1.0, fontsize=9)
+    box(ax, (12.5, 8.2),
         "PAM nucleotide encoding\n(one-hot per base)\n[B × 3 × 4]",
-        "latent", w=3.0, h=1.0, fontsize=9)
+        "latent", w=2.8, h=1.0, fontsize=9)
 
     # =====================================================================
     # Layer 3: Trainable modules
@@ -138,59 +146,66 @@ def main():
     box(ax, (3.5, 6.5),
         r"$\phi$  shared positional MLP" + "\n(Linear → ReLU → Linear)",
         "module", w=3.8, h=0.95, fontsize=10)
-    box(ax, (11.0, 6.5),
+    box(ax, (8.5, 6.5),
+        r"$\rho$  context module (MLP)",
+        "module", w=2.8, h=0.95, fontsize=10)
+    box(ax, (12.5, 6.5),
         r"$\psi$  PAM module (MLP)",
         "module", w=2.8, h=0.95, fontsize=10)
 
     # =====================================================================
-    # Layer 4: Per-position penalties P_i (post-ReLU) + g_pam
+    # Layer 4: Per-position penalties P_i (post-ReLU), g_ctx and g_pam
     # =====================================================================
     pos_y = 4.7
     positions = [
-        (0.5,  r"$P_0$"),
-        (1.7,  "..."),
-        (2.9,  r"$P_7$"),
-        (4.1,  r"$P_8$"),
-        (5.3,  "..."),
-        (6.5,  r"$P_{15}$"),
-        (7.7,  r"$P_{16}$"),
-        (8.9,  "..."),
-        (10.1, r"$P_{19}$"),
+        (0.4,  r"$P_0$"),
+        (1.2,  "..."),
+        (2.0,  r"$P_7$"),
+        (2.8,  r"$P_8$"),
+        (3.6,  "..."),
+        (4.4,  r"$P_{15}$"),
+        (5.2,  r"$P_{16}$"),
+        (6.0,  "..."),
+        (6.8,  r"$P_{19}$"),
     ]
     for x, lbl in positions:
         if lbl == "...":
             ax.text(x, pos_y, "⋯", ha="center", va="center",
-                    fontsize=16, color="#888", fontweight="bold")
+                    fontsize=14, color="#888", fontweight="bold")
         else:
-            pos_node(ax, (x, pos_y), lbl)
+            pos_node(ax, (x, pos_y), lbl, w=0.75, h=0.55, fontsize=9)
 
     # Annotation: P_i are the 20 per-position penalties (post-ReLU, so >= 0)
-    ax.text(5.3, pos_y - 0.65,
+    ax.text(3.6, pos_y - 0.65,
             r"per-position penalties $P_i \geq 0$  (Hard Prior 1: ReLU on $\phi$ output)",
             ha="center", va="top", fontsize=8.5, color="#0b5e2b",
             fontweight="bold", style="italic")
 
+    # g_ctx node (context contribution)
+    box(ax, (8.5, pos_y), r"$g_{\mathrm{ctx}}$",
+        "latent", w=1.4, h=0.7, fontsize=11)
+
     # g_pam node
-    box(ax, (11.5, pos_y), r"$g_{\mathrm{pam}}$",
+    box(ax, (12.5, pos_y), r"$g_{\mathrm{pam}}$",
         "latent", w=1.4, h=0.7, fontsize=11)
 
     # =====================================================================
     # Layer 5: Combiner ℓ_struct + U exogenous
     # =====================================================================
-    box(ax, (5.0, 2.7),
+    box(ax, (5.5, 2.7),
         "Combiner  " + r"$\ell_{\mathrm{struct}}(X)$" + "\n"
-        + r"$= \sum_{i=0}^{19} w_{\mathrm{pos},i}\, P_i + g_{\mathrm{pam}} + c$",
-        "logit", w=7.4, h=1.1, fontsize=10)
+        + r"$= \sum_{i=0}^{19} w_{\mathrm{pos},i}\, P_i + g_{\mathrm{ctx}} + g_{\mathrm{pam}} + c$",
+        "logit", w=8.6, h=1.1, fontsize=10)
 
     # U exogenous: dashed border, recovered algebraically (NOT a trainable component)
-    box(ax, (13.0, 2.7),
+    box(ax, (13.8, 2.7),
         r"$U$" + "\nexogenous\n(algebraic\nabduction)",
         "exog", w=2.3, h=1.5, fontsize=9, dashed=True)
 
     # =====================================================================
     # Layer 6: Outcome
     # =====================================================================
-    box(ax, (7.0, 0.7),
+    box(ax, (8.0, 0.7),
         r"$Y = \sigma(\ell_{\mathrm{struct}}(X) + U)$",
         "outcome", w=4.8, h=0.85, fontsize=11)
 
@@ -201,35 +216,32 @@ def main():
     # ---- raw inputs -> encoded tensors ----
     arrow(ax, (3.5, 9.35), (3.5, 8.75), COLOR_EDGE_F, lw=1.3,
           label="encode", label_pos=0.5)
-    arrow(ax, (11.0, 9.35), (11.0, 8.75), COLOR_EDGE_F, lw=1.3,
+    arrow(ax, (8.5, 9.35), (8.5, 8.75), COLOR_EDGE_F, lw=1.3,
+          label="GC stats", label_pos=0.5)
+    arrow(ax, (12.5, 9.35), (12.5, 8.75), COLOR_EDGE_F, lw=1.3,
           label="encode", label_pos=0.5)
 
     # ---- encoded tensors -> trainable modules ----
     arrow(ax, (3.5, 7.70), (3.5, 7.00), COLOR_EDGE_F, lw=1.3)
-    arrow(ax, (11.0, 7.70), (11.0, 7.00), COLOR_EDGE_F, lw=1.3)
+    arrow(ax, (8.5, 7.70), (8.5, 7.00), COLOR_EDGE_F, lw=1.3)
+    arrow(ax, (12.5, 7.70), (12.5, 7.00), COLOR_EDGE_F, lw=1.3)
 
-    # ---- phi -> per-position outputs (showing weight-sharing visually) ----
-    # Fan of arrows from the single phi module to all P_i nodes
+    # ---- phi -> per-position outputs (fan, showing weight-sharing) ----
     phi_anchor = (3.5, 6.02)
     for x, lbl in positions:
         if lbl == "...":
             continue
         arrow(ax, phi_anchor, (x, pos_y + 0.30),
               COLOR_EDGE_F, lw=0.7, mutation_scale=7, shrinkA=4, shrinkB=4)
-    # # Annotation: weight sharing (one MLP, twenty positions)
-    # ax.text(0.2, 5.55,
-    #         "applied independently\nto each position\n(weight sharing)",
-    #         ha="left", va="center", fontsize=8.5, color=COLOR_EDGE_F,
-    #         fontweight="bold", style="italic",
-    #         bbox=dict(boxstyle="round,pad=0.20", facecolor="white",
-    #                   edgecolor=COLOR_EDGE_F, alpha=0.95))
+
+    # ---- rho -> g_ctx ----
+    arrow(ax, (8.5, 6.02), (8.5, 5.05), COLOR_EDGE_F, lw=1.3)
 
     # ---- psi -> g_pam ----
-    arrow(ax, (11.0, 6.02), (11.5, 5.05),
-          COLOR_EDGE_F, lw=1.3)
+    arrow(ax, (12.5, 6.02), (12.5, 5.05), COLOR_EDGE_F, lw=1.3)
 
     # ---- per-position outputs -> combiner (weighted, w_pos,i <= 0) ----
-    logit_anchor_in = (5.0, 3.30)
+    logit_anchor_in = (4.5, 3.30)
     for x, lbl in positions:
         if lbl == "...":
             continue
@@ -246,18 +258,23 @@ def main():
             bbox=dict(boxstyle="round,pad=0.20", facecolor="white",
                       edgecolor=COLOR_EDGE_W, alpha=0.95))
 
-    # ---- g_pam -> combiner (additive, NOT multiplicative) ----
-    arrow(ax, (11.5, 4.35), (8.2, 2.85),
+    # ---- g_ctx -> combiner (additive) ----
+    arrow(ax, (8.5, 4.35), (7.2, 3.25),
+          COLOR_EDGE_A, label=r"$+\,g_{\mathrm{ctx}}$",
+          label_pos=0.55, curvature=-0.15, lw=1.5)
+
+    # ---- g_pam -> combiner (additive) ----
+    arrow(ax, (12.5, 4.35), (9.4, 3.10),
           COLOR_EDGE_A, label=r"$+\,g_{\mathrm{pam}}$",
-          label_pos=0.55, curvature=-0.18, lw=1.5)
+          label_pos=0.55, curvature=-0.20, lw=1.5)
 
     # ---- combiner -> outcome (sigmoid) ----
-    arrow(ax, (5.0, 2.15), (6.4, 1.13),
+    arrow(ax, (5.5, 2.15), (7.0, 1.13),
           COLOR_EDGE_F, label=r"$\sigma(\cdot)$",
           label_pos=0.55, lw=1.5)
 
-    # ---- U -> outcome (additive, dashed for exogenous + algebraic recovery) ----
-    arrow(ax, (13.0, 1.95), (8.6, 1.13),
+    # ---- U -> outcome ----
+    arrow(ax, (13.8, 1.95), (9.4, 1.13),
           COLOR_EDGE_U, label=r"$+\,U$",
           label_pos=0.45, style="--", curvature=-0.15, lw=1.4)
 

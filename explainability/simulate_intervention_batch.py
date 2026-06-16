@@ -115,7 +115,7 @@ def main():
     parser.add_argument("--dataset", choices=["changeseq", "guideseq"], default="guideseq")
     parser.add_argument(
         "--model_path",
-        default="experiments/results/Exp18_Positional_AdditivePAM/neural_scm.pt",
+        default="experiments/results/Exp24_MergedSplit_Causal_0p1/neural_scm.pt",
     )
     parser.add_argument("--pam-mode", choices=["additive", "multiplicative"], default="additive")
     parser.add_argument("--output_dir", default="explainability/batch_results")

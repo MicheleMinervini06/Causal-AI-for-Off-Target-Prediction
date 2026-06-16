@@ -23,6 +23,7 @@ from dag.do_calculus import (
 from dag.scm import CRISPRCausalModel
 from dag.nodes import CRISPRPairFeatures
 from evaluation.ccs import calculate_ccs
+from evaluation.metrics import evaluate_model, find_optimal_threshold
 from models.baseline.xgboost import XGBoostWrapper
 from models.baseline.catboost import CatBoostWrapper
 
@@ -94,6 +95,37 @@ def _safe_float_dict(payload: dict[str, Any]) -> dict[str, Any]:
 def _save_json(payload: dict[str, Any], path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+def _predict_scm_proba(scm: CRISPRCausalModel, df: pd.DataFrame) -> np.ndarray:
+    """Restituisce le probabilita' predette dal SCM su uno split."""
+    return np.asarray(
+        [
+            scm.predict((str(sg), str(off)))["activity_probability"]
+            for sg, off in zip(df["sgRNA_seq"], df["off_seq"])
+        ],
+        dtype=float,
+    )
+
+
+def _evaluate_scm_split(
+    scm: CRISPRCausalModel,
+    df: pd.DataFrame,
+    split_name: str,
+    threshold: float,
+) -> dict[str, Any]:
+    y_true = df["label"].to_numpy(dtype=float)
+    y_proba = _predict_scm_proba(scm, df)
+    result = evaluate_model(
+        model_name="CRISPRCausalModel",
+        y_true=y_true,
+        y_pred_proba=y_proba,
+        split=split_name,
+        threshold=threshold,
+    )
+    payload = result.to_dict()
+    payload["threshold_source"] = "validation"
+    return payload
 
 
 def _failure_rate(independence_df: pd.DataFrame) -> float:
@@ -257,10 +289,14 @@ def main(config_path: Path) -> None:
     indep_cfg = cfg.get("independence", {})
 
     df_fit = _sample_df(splits[fit_split], phase2_cfg.get("max_fit_rows"), seed)
+    # Coerenza con exp_03: validation sempre su split "val".
+    df_val = splits["val"]
+    # Test segue evaluation_split configurabile.
     df_eval = _sample_df(splits[eval_split], phase2_cfg.get("max_eval_rows"), seed)
     df_indep = _sample_df(df_fit, indep_cfg.get("max_rows"), seed)
 
     log.info("Effective fit rows: %d", len(df_fit))
+    log.info("Effective val rows: %d", len(df_val))
     log.info("Effective eval rows: %d", len(df_eval))
     log.info("Effective CI rows: %d", len(df_indep))
 
@@ -297,6 +333,27 @@ def main(config_path: Path) -> None:
 
     params_json = results_dir / cfg.get("output", {}).get("scm_parameters_json", "scm_parameters.json")
     _save_json(params, params_json)
+
+    # 2b) Performance SCM classico su train/val/test (coerente con exp_03)
+    train_proba = _predict_scm_proba(scm, df_fit)
+    val_proba = _predict_scm_proba(scm, df_val)
+
+    threshold = find_optimal_threshold(df_val["label"].to_numpy(dtype=float), val_proba, metric="f1")
+    log.info("SCM classification threshold selected on validation: %.3f", threshold)
+
+    scm_output = cfg.get("output", {})
+    train_metrics_payload = _evaluate_scm_split(scm, df_fit, fit_split, threshold)
+    val_metrics_payload = _evaluate_scm_split(scm, df_val, "val", threshold)
+    test_split_name = eval_split
+    test_df = df_eval
+    test_metrics_payload = _evaluate_scm_split(scm, test_df, test_split_name, threshold)
+
+    train_metrics_json = results_dir / scm_output.get("metrics_train_json", "scm_train_metrics.json")
+    val_metrics_json = results_dir / scm_output.get("metrics_val_json", "scm_val_metrics.json")
+    test_metrics_json = results_dir / scm_output.get("metrics_test_json", "scm_test_metrics.json")
+    _save_json(train_metrics_payload, train_metrics_json)
+    _save_json(val_metrics_payload, val_metrics_json)
+    _save_json(test_metrics_payload, test_metrics_json)
 
     # 3) Observational vs interventional queries
     _run_interventional_queries(scm, df_eval, cfg, results_dir)

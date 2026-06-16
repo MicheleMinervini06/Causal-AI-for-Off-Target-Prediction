@@ -49,6 +49,9 @@ ccs:
 output:
   independence_csv: dag_independence_tests.csv
   scm_parameters_json: scm_parameters.json
+  metrics_train_json: scm_train_metrics.json
+  metrics_val_json: scm_val_metrics.json
+  metrics_test_json: scm_test_metrics.json
   observational_vs_do_csv: observational_vs_do.csv
   ccs_baseline_json: ccs_baseline.json
   intervention_dataset_parquet: intervention_dataset.parquet

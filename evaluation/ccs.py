@@ -249,3 +249,110 @@ def calculate_ccs_neural(
         })
 
     return results
+
+
+def calculate_ccs_neural_v2(
+    model,
+    unique_guides: list[str],
+    h_penalty: float = 5.0,
+    pam_levels: tuple[float, float, float] = (-1.0, 0.0, 2.0),
+    pam_ablation: float = -3.0,
+) -> dict:
+    """
+    CCS v2 — designed for the positional_mlp + additive PAM architecture (Exp20+).
+
+    The original calculate_ccs_neural() probes regional interventions
+    (do(seed=...), do(proximal=...), do(non_seed=...)) which positional_mlp
+    ignores by construction — the regional aggregations are derived sums of
+    20 positional nodes, not separate causal nodes.
+
+    This v2 probes positional-level interventions do(pos_i=v) and PAM
+    interventions do(pam_gate=v), which the additive architecture supports
+    natively. Five rules, each with a clear biological interpretation:
+
+        R1: PAM ablation                     do(pam_gate=-3) < baseline
+        R2: PAM hierarchy (monotone)         do(pam=-1) < do(pam=0) < do(pam=2)
+        R3: Seed > Distal sensitivity        do(pos_18=h) < do(pos_2=h)
+        R4: Position gradient monotonic      drop_2 < drop_8 < drop_14 < drop_18
+        R5: Heal mismatch via intervention   on a synthetically-stressed target,
+                                             do(pos_18=0) > no-intervention
+    """
+    try:
+        import torch
+    except ImportError:
+        raise ImportError("PyTorch is required for calculate_ccs_neural_v2.")
+
+    if not unique_guides:
+        raise ValueError("unique_guides cannot be empty")
+    if any(len(g) < 20 for g in unique_guides):
+        raise ValueError("Each guide must be at least 20 nt long")
+
+    guides = [g[:20].upper() for g in unique_guides]
+    perfect_targets = [g + "AGG" for g in guides]
+
+    def _forward(targets):
+        with torch.no_grad():
+            out = model.forward(guides, targets)
+        return out["activity_probability"].squeeze(-1).cpu().numpy()
+
+    def _do(targets, intervention):
+        with torch.no_grad():
+            out = model.do(guides, targets, intervention)
+        return out["activity_probability"].squeeze(-1).cpu().numpy()
+
+    # Baseline on perfect-match targets
+    p_base = _forward(perfect_targets)
+
+    # ── R1: PAM ablation ────────────────────────────────────────────────
+    p_pam_ablated = _do(perfect_targets, {"pam_gate": pam_ablation})
+    r1_pass = (p_pam_ablated < p_base).astype(int)
+
+    # ── R2: PAM hierarchy (3-level monotonicity) ────────────────────────
+    p_pam_a = _do(perfect_targets, {"pam_gate": pam_levels[0]})
+    p_pam_b = _do(perfect_targets, {"pam_gate": pam_levels[1]})
+    p_pam_c = _do(perfect_targets, {"pam_gate": pam_levels[2]})
+    r2_pass = ((p_pam_a < p_pam_b) & (p_pam_b < p_pam_c)).astype(int)
+
+    # ── R3: Seed (pos 18) > PAM-distal (pos 2) sensitivity ─────────────
+    p_pos18 = _do(perfect_targets, {"pos_18": h_penalty})
+    p_pos2  = _do(perfect_targets, {"pos_2":  h_penalty})
+    r3_pass = (p_pos18 < p_pos2).astype(int)
+
+    # ── R4: Position gradient monotonic across {2, 8, 14, 18} ──────────
+    positions = [2, 8, 14, 18]
+    drops = []
+    for pos in positions:
+        p_pos = _do(perfect_targets, {f"pos_{pos}": h_penalty})
+        drops.append(p_base - p_pos)
+    monotonic = (drops[0] < drops[1]) & (drops[1] < drops[2]) & (drops[2] < drops[3])
+    r4_pass = monotonic.astype(int)
+
+    # ── R5: Heal mismatch via do(pos_18=0) on a stressed target ────────
+    stressed_targets = [
+        g[:18] + mutate_base(g[18]) + g[19] + "AGG" for g in guides
+    ]
+    p_dirty  = _forward(stressed_targets)
+    p_healed = _do(stressed_targets, {"pos_18": 0.0})
+    r5_pass = (p_healed > p_dirty).astype(int)
+
+    return {
+        "R1_PAM_Ablation":      float(np.mean(r1_pass)),
+        "R2_PAM_Hierarchy":     float(np.mean(r2_pass)),
+        "R3_Seed_vs_Distal":    float(np.mean(r3_pass)),
+        "R4_Position_Gradient": float(np.mean(r4_pass)),
+        "R5_Heal_Mismatch":     float(np.mean(r5_pass)),
+        "CCS_Overall": float(np.mean([
+            np.mean(r1_pass),
+            np.mean(r2_pass),
+            np.mean(r3_pass),
+            np.mean(r4_pass),
+            np.mean(r5_pass),
+        ])),
+        "method": "neural_do_v2_positional_mlp_additive_pam",
+        "config": {
+            "h_penalty":    h_penalty,
+            "pam_levels":   list(pam_levels),
+            "pam_ablation": pam_ablation,
+            "n_guides":     len(guides),
+        },
+    }

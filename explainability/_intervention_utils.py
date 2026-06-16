@@ -195,6 +195,16 @@ def load_neural_scm(
     if "context_net.0.weight" in state_dict:
         context_dim = state_dict["context_net.0.weight"].shape[1]
 
+    # Auto-detect positional_use_encoder from the input dimensionality of pos_node.
+    # pos_node.0.weight has shape [hidden_dim, pos_input_dim]; pos_input_dim == 4
+    # is the internal mismatch-type encoding (use_encoder=False), while
+    # pos_input_dim == encoder.embed_dim (12 for BiologicalMismatchEncoder)
+    # corresponds to use_encoder=True (Exp30+).
+    positional_use_encoder = False
+    if "pos_node.0.weight" in state_dict:
+        pos_in_dim = state_dict["pos_node.0.weight"].shape[1]
+        positional_use_encoder = (pos_in_dim != 4)
+
     encoder = BiologicalMismatchEncoder()
     model = NeuralSCM(
         encoder=encoder,
@@ -202,6 +212,7 @@ def load_neural_scm(
         hidden_dim=hidden_dim,
         context_dim=context_dim,
         pam_mode=pam_mode,
+        positional_use_encoder=positional_use_encoder,
     )
     model.load_state_dict(state_dict)
     model.to(device).eval()

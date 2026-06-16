@@ -1,8 +1,6 @@
 # Python cache and tooling
 __pycache__/
 *.py[cod]
-*.pyo
-*.pyd
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
@@ -14,10 +12,8 @@ __pycache__/
 # Notebook checkpoints
 .ipynb_checkpoints/
 
-# Data outputs
-data/processed/features/*
-data/processed/splits/*
-data/logs/*.h5
+# Data (large: raw, processed, logs — not versioned)
+data/
 
 # Experimental outputs
 experiments/results/*
@@ -37,6 +33,10 @@ doc/thesis/*
 #Explainability results
 explainability/batch_results*
 explainability/calibration_results*
+explainability/thesis_results*
 
-#Slides
+#Test outputs
+tests/output/
+
+#Slides workspace (node_modules, build)
 phd-interview/
